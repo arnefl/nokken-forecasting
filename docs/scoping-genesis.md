@@ -24,6 +24,52 @@ siblings' `CLAUDE.md`.
 
 ---
 
+## Decisions (final)
+
+Compact reference for phase PRs — read this block alone if you don't
+need the archaeology. Each bullet points at the section where the
+decision is elaborated; §8 tags each item closed / deferred / open.
+
+- **First target section** — Sjoa, modelled on gauge id 12 (NVE
+  "Faukstad", sourcing key `2.595.0`). Six `sections` rows (ids 54,
+  55, 56, 57, 128, 142) link to this gauge, all with `gauge_sub=0`
+  (primary linkage). One model serves the whole Sjoa stretch;
+  per-section paddleability resolves via the existing `flowMin` /
+  `flowMax` thresholds in nokken-web. (§6)
+- **Forecast horizon** — 7-day forecast, hourly resolution.
+  Hindcast scored at lead-times {1, 3, 6, 12, 24, 48, 72, 120, 168}
+  hours, each independently. (§5.5)
+- **Primary metric** — KGE as the primary "beats baseline" number;
+  MAE (m³/s) as operator-readable secondary; pinball loss at τ=0.9
+  for high-flow-tail skill. All three reported per-lead-time as
+  skill scores against a persistence baseline (not against zero).
+  (§5.5)
+- **Hindcast window** — train 2003-01 → 2019-12 (~17 years);
+  hindcast 2020-01 → 2024-12 (5 years). Recent test window
+  deliberately — that is the climatology production will face.
+  Unconstrained on the Faukstad observation side; revisit if
+  shorter-history sections are added later. (§5.5)
+- **Forecast-sink + weather table families** — three table families
+  owned by nokken-web: (a) forecasts written by
+  nokken-forecasting; (b) historical weather / forcing written by
+  nokken-data; (c) weather forecasts written by nokken-data. All
+  hourly, basin-mean per section (or per catchment — nokken-web's
+  call). nokken-forecasting proposes shapes for (a) and (c) in the
+  Phase 2 nokken-web PR. (§2.4, §7.2)
+- **Forcing aggregation ownership** — nokken-data clips gridded
+  forcings to basin polygons and writes hourly basin-mean series to
+  Postgres; nokken-forecasting reads tidy time-series and never
+  touches a raster; nokken-web reads the same tables for UI. Raw
+  grids (MET, seNorge, NORA3) are refetchable upstream, not
+  persisted. If Phase 4 picks Shyft-os and needs per-cell forcings,
+  that is a new path built then, not now. (§7.1)
+
+Still open (carried in §8): framework-choice timing (6), Shyft-os
+local dev path (9), output cadence (10), REGINE / vassdrag
+upstream-gauge auto-discovery (11, parallel track to Phase 2).
+
+---
+
 ## 1. Purpose & scope
 
 **Goal.** Produce short-horizon (1–7 day) forecasts of river flow
@@ -602,39 +648,61 @@ repo that owns each gap.
 
 ## 8. Open decisions
 
-Numbered list. Each must be closed by the user before the
-dependent phase of `ROADMAP.md` starts. No guessing; each entry
-names the blocking phase.
+Numbered list. Each carries a status tag. Closed decisions point at
+the "Decisions (final)" block at the top of this file for the
+answer; deferred decisions record why the answer can wait; open
+decisions still need the user.
 
 1. **First target section (§6).** Sjoa, Rauma Lower, Driva, or
-   something else? Blocks Phase 3.
+   something else? Blocks Phase 3. **[closed — see Decisions
+   (final).]**
 2. **Forecast horizon grid.** 1, 2, 3, 5, 7 days as proposed in
    §5.5, or a different grid (e.g. hourly sub-daily for the first
-   24h)? Blocks Phase 3.
+   24h)? Blocks Phase 3. **[closed — see Decisions (final).]**
 3. **Primary error metric.** KGE and NSE, or MAE, or pinball loss
    at a specific τ? What counts as "win"? Blocks Phase 3.
+   **[closed — see Decisions (final).]**
 4. **Hindcast window length.** ≥5 years as proposed, or longer /
    shorter depending on per-gauge observation span. Blocks Phase 3.
+   **[closed — see Decisions (final).]**
 5. **Forecast-sink table shape (§2.4, §7.2).** Single table with
    quantile column vs. separate deterministic / probabilistic
    tables; hypertable vs. plain. This is nokken-web's call, but
    nokken-forecasting should propose a shape. Blocks Phase 2 (data
-   readiness) and Phase 6 (production job).
+   readiness) and Phase 6 (production job). **[closed — scope
+   expanded to three table families (forecasts, historical weather,
+   weather forecasts); see Decisions (final).]**
 6. **Framework-choice timing.** Commit to either Shyft-os or
    baselines after Phase 4, or run both in parallel production-like
-   for a calibration window? Blocks Phase 5.
+   for a calibration window? Blocks Phase 5. **[deferred — revisit
+   at end of Phase 3.]**
 7. **`sections.gauge_sub` semantics (§2.2).** "Proxy vs. primary",
    "triggers warning" (per `INVENTORY.md:B`), or something else?
    Whether a `gauge_sub=1` section is a valid forecasting target
-   depends on the answer. Can be closed by asking the user — does
-   not block scaffolding PRs.
+   depends on the answer. **[closed for the first target — all six
+   Sjoa sections on gauge id 12 carry `gauge_sub=0` (confirmed via
+   the PR #2 read-only DB access); the primary linkage reading is
+   the working interpretation. Semantics for non-zero values stay
+   deferred until a second target section surfaces one.]**
 8. **Forcing aggregation ownership (§7.1).** Basin-mean
    interpolation in nokken-data (pre-aggregated tables) or in
    nokken-forecasting (read grids, aggregate in-process)? Blocks
-   Phase 2 data-gap PR shape.
+   Phase 2 data-gap PR shape. **[closed — see Decisions (final).]**
 9. **Shyft-os local dev path.** Conda channel or from-source build
    on the operator's Mac (no macOS wheels on PyPI per §4.2)? Blocks
-   Phase 4 start.
+   Phase 4 start. **[deferred — revisit at end of Phase 3.]**
 10. **Output cadence.** Once daily at a fixed UTC hour, or aligned
     with MET forecast issue times (typically 00Z/06Z/12Z/18Z)?
-    Blocks Phase 6.
+    Blocks Phase 6. **[deferred — revisit at end of Phase 3.]**
+11. **Upstream-gauge auto-discovery via REGINE / vassdrag code.**
+    Add a vassdrag / REGINE identifier column to
+    `nokken-web.gauges`; sync the NVE station catalogue from HydAPI
+    `/Stations` so ghost gauges (not linked to a `section`) are
+    present in the table; enumerate upstream-of-Faukstad gauges
+    topologically; use as features in Phase 3.5+. Cross-repo:
+    nokken-web column + relaxation of the implicit "gauge must link
+    to section" assumption; nokken-data new station-catalogue sync
+    pipeline; nokken-forecasting consumes. Runs as a parallel track
+    to Phase 2, does not gate it. Blocks Phase 3.5 (upstream-gauge
+    feature layering); does not block Phase 3 baselines on forcings
+    alone. **[open — parallel track to Phase 2.]**
