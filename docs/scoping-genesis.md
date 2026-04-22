@@ -228,10 +228,16 @@ gauges).
   reanalysis (`met_forcing_v2`), no radar QPE. Grep across
   `nokken-data/` finds zero mentions of `met.no` or
   `api.met.no`.
-- **Kartverket** — no tide-gauge or coastal-weather fetchers.
-  Mentioned only in `nokken-web/MIGRATION_PLAN.md:62-72` as a
-  *future* N5 elevation-data source for UI, unrelated to
-  forecasting inputs.
+- **Kartverket** — no fetchers today. The forecasting-relevant
+  Kartverket product is the national detailed height model (DTM
+  at 1, 10, and 50 m resolution), distributed via
+  [høydedata.no](https://hoydedata.no/) under Kartverket's open
+  terms of use ([Kartverket terrengdata page](https://www.kartverket.no/api-og-data/terrengdata)).
+  A DEM is not needed for the §5 baselines; it is conditionally
+  needed for Phase 4 Shyft-os cell-vector construction per §4.1.
+  (The N5 reference in `nokken-web/MIGRATION_PLAN.md:62-72` is a
+  separate UI-side elevation-profile concern, not a forecasting
+  input.)
 - **ECMWF open data** — not wired.
 - **MET reanalysis / NORA3 / seNorge** (the gridded
   temperature+precipitation products that would be the natural
