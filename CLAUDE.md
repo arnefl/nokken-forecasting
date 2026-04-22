@@ -107,10 +107,32 @@ that resolves the conflict.
 - Variable names mirror nokken-web and nokken-data so a single
   credential set spans all three.
 - Never commit real values. Never log env contents, DB DSNs, or
-  anything that can carry a secret.
+  anything that can carry a secret. Never echo a `.env` value into
+  a tool result, sub-agent prompt, commit message, or PR body.
 - Legacy `cron_nokken` scripts contain inlined credentials. They
   are never to be read or imported — the transcription in
   `nokken-data/docs/scoping.md` §1 redacts them to role/name only.
+
+#### Local-dev `.env` populated from `nokken-web/.env`
+
+The three repos share one Postgres database, so they share one
+credential set. The canonical source for local-dev DB creds is
+`nokken-web/.env` (the read-only `nokken_ro` role lives there).
+When this repo's local `.env` needs to be populated:
+
+- Copy only the variables this repo's `.env.example` declares —
+  today that means `POSTGRES_DSN` and nothing else. Do not copy
+  unrelated keys (app secrets, push provider tokens, etc.).
+- Refuse to copy a read-write role into this repo while it remains
+  a read-only consumer. If `nokken-web/.env`'s `POSTGRES_DSN` is
+  not the `nokken_ro` role, stop and flag it rather than narrow
+  the role yourself.
+- If `../nokken-web/.env` is missing, stop and flag it. Do not
+  prompt the operator for credentials interactively and do not
+  invent placeholder values.
+
+This convention is new — neither sibling needs it, since they are
+the originating sources.
 
 ### No commits to `main`
 

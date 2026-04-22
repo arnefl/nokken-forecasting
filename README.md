@@ -30,6 +30,17 @@ uv run pytest
 uv run ruff check
 ```
 
-Phase 1 (this PR) is scoping and scaffolding only — no model code, no
-data access, no dependencies on the database. The first substantive
-modelling work lands in Phase 3.
+### Local DB credentials
+
+This repo reads from the same Postgres `nessie` database as nokken-web
+and nokken-data. The canonical source for local-dev DB credentials is
+the sibling `nokken-web/.env` (read-only `nokken_ro` role). To exercise
+DB-backed code locally, populate `nokken-forecasting/.env` (gitignored)
+with the `POSTGRES_DSN` value from `nokken-web/.env`. Variable names
+match across the three repos. The integration smoke test
+(`tests/integration/test_db_smoke.py`) skips cleanly when the env var
+is not set, so `uv run pytest` works without a DB on hand.
+
+Phase 1 onward is incremental — scoping landed first, read-only DB
+access lands here, and the first substantive modelling work lands in
+Phase 3 (see [`ROADMAP.md`](./ROADMAP.md)).
