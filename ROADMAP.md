@@ -52,9 +52,13 @@ section committed. Landed via coordinated PRs in `nokken-data` and
 once the sink schema is defined.
 
 **Entry criteria.**
-- Open decisions 1 (first section), 5 (sink shape), 8 (forcing
-  aggregation ownership) are closed in
-  `docs/scoping-genesis.md` §8.
+- Open decisions 1 (first section), 2 (horizon grid), 3 (primary
+  metric), 4 (hindcast window), 5 (sink shape), and 8 (forcing
+  aggregation ownership) are closed. Current state and the compact
+  answer for each live in `docs/scoping-genesis.md` "Decisions
+  (final)"; §8 carries the tags. 2/3/4 are Phase-3 gates but closing
+  them alongside shapes the sink schema proposal (hourly grain,
+  7-day horizon, quantile columns).
 
 **Exit criteria.**
 - Forecast-sink migration exists in `nokken-web/db/postgres/migrations/`
@@ -73,6 +77,45 @@ once the sink schema is defined.
 **Repos touched.** `nokken-web` (migration + pydantic model),
 `nokken-data` (ingestion), `nokken-forecasting` (read client +
 SCHEMA_COMPAT).
+
+---
+
+## Phase 2b — REGINE upstream-gauge track (parallel to Phase 2)
+
+**Goal.** Make upstream-of-target gauges discoverable as features
+by (a) adding a vassdrag / REGINE identifier column to
+`nokken-web.gauges`, (b) syncing the NVE station catalogue from
+HydAPI `/Stations` so "ghost" gauges (not linked to any `section`)
+exist as rows, and (c) providing a topological
+upstream-of-Faukstad traversal that Phase 3.5+ can consume as a
+feature source.
+
+**Parallelism.** Runs alongside Phase 2; does **not** gate Phase 3
+baselines on forcings alone. It gates Phase 3.5 (upstream-gauge
+feature layering) only. Phase 3 may start the moment Phase 2 exits,
+even if Phase 2b is still in flight.
+
+**Entry criteria.**
+- Open decision 11 (REGINE / vassdrag upstream-gauge
+  auto-discovery, `docs/scoping-genesis.md` §8) closed.
+
+**Exit criteria.**
+- `gauges.regine_code` (or equivalent) column exists in the
+  nokken-web Postgres schema, with the "gauge must link to a
+  section" assumption relaxed so ghost gauges can be inserted. ⇆
+  nokken-web
+- An NVE station-catalogue sync pipeline is running in nokken-data
+  (populates ghost gauges keyed by REGINE + NVE sourcing_key; idle
+  linkage to `sections` left as NULL). ⇆ nokken-data
+- A topological "upstream-of-X" query available from this repo,
+  exercised against gauge id 12 (Faukstad) as the motivating case
+  and committed as part of the read layer added in Phase 2.
+- Short note in `docs/` summarising the REGINE convention, the
+  traversal, and which gauges were discovered upstream of Faukstad.
+
+**Repos touched.** `nokken-web` (schema column + constraint
+relaxation), `nokken-data` (new station-catalogue sync),
+`nokken-forecasting` (traversal + consumption).
 
 ---
 
