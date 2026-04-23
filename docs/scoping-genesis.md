@@ -44,11 +44,13 @@ decision is elaborated; §8 tags each item closed / deferred / open.
   for high-flow-tail skill. All three reported per-lead-time as
   skill scores against a persistence baseline (not against zero).
   (§5.5)
-- **Hindcast window** — train 2003-01 → 2019-12 (~17 years);
+- **Hindcast window** — train 2012-01 → 2019-12 (8 years);
   hindcast 2020-01 → 2024-12 (5 years). Recent test window
   deliberately — that is the climatology production will face.
-  Unconstrained on the Faukstad observation side; revisit if
-  shorter-history sections are added later. (§5.5)
+  Training start bounded by MET Nordic's hourly-gridded-observation
+  availability floor, not by Faukstad observations (which extend
+  back to 2003-01-31; verified against live `nessie` in PR #4).
+  See §8 #4 "Window reopened (2026-04)". (§5.5)
 - **Forecast-sink + weather table families** — three table families
   owned by nokken-web: (a) forecasts written by
   nokken-forecasting; (b) historical weather / forcing written by
@@ -665,6 +667,15 @@ decisions still need the user.
 4. **Hindcast window length.** ≥5 years as proposed, or longer /
    shorter depending on per-gauge observation span. Blocks Phase 3.
    **[closed — see Decisions (final).]**
+
+   *Window reopened (2026-04).* Training start moved 2003-01 →
+   2012-01, bounded by MET Nordic — the only MET-ecosystem hourly
+   gridded observation product covering both training and serving
+   eras; alternatives were considered and rejected in the chat
+   decision that settled it, and are not re-litigated here.
+   Faukstad observations extend back to 2003-01-31 (verified
+   against live `nessie` in PR #4), so the observation side does
+   not bind. Test window (2020-01 → 2024-12) unchanged.
 5. **Forecast-sink table shape (§2.4, §7.2).** Single table with
    quantile column vs. separate deterministic / probabilistic
    tables; hypertable vs. plain. This is nokken-web's call, but
