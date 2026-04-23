@@ -9,6 +9,9 @@ dependencies = [
     "pydantic-settings>=2.5",
 ]
 
+[project.scripts]
+nokken-forecasting = "nokken_forecasting.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.3",
