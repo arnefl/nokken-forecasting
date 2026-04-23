@@ -11,15 +11,25 @@ rationale; the same pattern is in use in
 ## Pinned nokken-web commit
 
 ```
-sha    = c18e41a4b2c8911f888f188033435ed14c9d1d18
+sha    = e9f1cf83047afe5d20d0d7ec30f8b8ee4bbf3bdf
 pinned = 2026-04-23
 ```
 
 This is the merge commit of
-[nokken-web PR #98](https://github.com/arnefl/nokken-web/pull/98)
-— "phase 2: forecast + weather schema foundation" — which introduces
-the three hypertables this repo reads from or (in Phase 6) writes
-to:
+[nokken-web PR #107](https://github.com/arnefl/nokken-web/pull/107)
+— "schema: basins — versioned NVE catchment polygons (007)" — which
+adds migration 007: a `basins` table keyed by `gauge_id` carrying
+NVE catchment polygons (GeoJSON in `jsonb`, per-row `geometry_crs`),
+versioned append-only via `(gauge_id, version)` with
+`superseded_at` flagging historical rows, and a `basins_current`
+view encapsulating the "latest non-superseded per gauge" read
+path. Phase 3+ reads basin geometry through `basins_current`;
+hindcast reproducibility reads `basins` directly and filters by
+`superseded_at`.
+
+The prior pin (`c18e41a…`, PR #98) introduced the three hypertables
+this repo reads from or (in Phase 6) writes to, and remains in
+effect:
 
 - `forecasts` — flow / level forecast outputs owned here; multi-lead,
   multi-quantile, multi-model-version.
@@ -28,9 +38,9 @@ to:
 - `weather_forecasts` — hourly basin-mean weather forecasts written
   by nokken-data; read here as live-forecast forcing.
 
-The prior pin (never landed here, tracked only in sibling
-`nokken-data/SCHEMA_COMPAT.md`) was `c0f0ff7…` (2026-04-22), which
-predated migrations 003/004/005.
+Earlier still, `c0f0ff7…` (2026-04-22; tracked only in sibling
+`nokken-data/SCHEMA_COMPAT.md`, never landed here) predated
+migrations 003/004/005.
 
 ## Bump protocol
 
