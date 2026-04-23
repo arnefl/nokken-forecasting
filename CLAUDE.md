@@ -176,6 +176,7 @@ When starting a task:
 
 - **Phases, tasks, progress:** `ROADMAP.md`.
 - **Scope, inventories, open decisions:** `docs/scoping-genesis.md`.
+- **Schema pin + bump protocol:** `SCHEMA_COMPAT.md`.
 - **Env-var names:** `.env.example`.
 - **Sibling repo pointers:** `README.md`.
 
@@ -189,3 +190,56 @@ uv run pytest
 
 `pyproject.toml` sets `pythonpath = ["src"]` so imports resolve
 without installing the package.
+
+## Inspection CLI
+
+`nokken-forecasting inspect` is a read-only tour of the shared
+Postgres schema. It rides the pool from
+`nokken_forecasting.db.postgres`, which sets
+`default_transaction_read_only = on` at session init — any write
+attempt (including CREATE / INSERT / UPDATE / DELETE / TRUNCATE)
+raises a Postgres read-only-transaction error regardless of the
+role's table privileges. The local-dev DSN copied from
+`nokken-web/.env` carries the `nokken_ro` role (per Secret hygiene
+above), so writes are blocked twice over; that is deliberate and
+must not be softened.
+
+The DSN in `.env` may, in principle, be write-capable (e.g., if a
+Phase 6 deploy reuses the same file). This repo is consumer-side
+only through Phase 5 — do not invent a write path on top of
+`get_pool()`. When the forecast-sink write path lands in Phase 6,
+it gets its own pool without the read-only init and with a role
+scoped to the sink tables; the read-only pool here stays as-is.
+
+Subcommands — run any of them with `--json` to emit machine-readable
+output instead of the default aligned text:
+
+- `nokken-forecasting inspect tables`
+  — list public-schema tables and flag Timescale hypertables.
+- `nokken-forecasting inspect describe <table>`
+  — columns, types, nullability, PK, indexes, hypertable dimensions.
+- `nokken-forecasting inspect count <table>`
+  — row count plus MIN/MAX of the time column where applicable.
+- `nokken-forecasting inspect sample <table> [--limit N] [--where SQL]`
+  — sample rows; `--where` is a parameterised WHERE fragment. No
+  trailing `;` and no SQL comments — the read-only session is the
+  real safety net, `assert_where_safe` is only a cheap early guard.
+- `nokken-forecasting inspect query "<SELECT …>"`
+  — arbitrary read-only query; the dispatcher rejects anything
+  whose first non-comment token is not `SELECT` (case-insensitive).
+
+Examples:
+
+```
+uv run nokken-forecasting inspect tables
+uv run nokken-forecasting inspect describe forecasts
+uv run nokken-forecasting inspect count observations
+uv run nokken-forecasting inspect sample observations --limit 3 \
+    --where "gauge_id = 12"
+uv run nokken-forecasting inspect query \
+    "SELECT value_type, MIN(time), MAX(time), COUNT(*) \
+     FROM observations WHERE gauge_id = 12 GROUP BY value_type"
+```
+
+Dogfood the CLI rather than dropping into `psql` for one-off reads,
+so the read-only guarantee is the single path consulted.
