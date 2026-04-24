@@ -11,32 +11,36 @@ rationale; the same pattern is in use in
 ## Pinned nokken-web commit
 
 ```
-sha    = e9f1cf83047afe5d20d0d7ec30f8b8ee4bbf3bdf
-pinned = 2026-04-23
+sha    = 4a886011d4087e0c3588f5a4db57cd7bfa2d64de
+pinned = 2026-04-24
 ```
 
 This is the merge commit of
-[nokken-web PR #107](https://github.com/arnefl/nokken-web/pull/107)
-— "schema: basins — versioned NVE catchment polygons (007)" — which
-adds migration 007: a `basins` table keyed by `gauge_id` carrying
-NVE catchment polygons (GeoJSON in `jsonb`, per-row `geometry_crs`),
-versioned append-only via `(gauge_id, version)` with
-`superseded_at` flagging historical rows, and a `basins_current`
-view encapsulating the "latest non-superseded per gauge" read
-path. Phase 3+ reads basin geometry through `basins_current`;
-hindcast reproducibility reads `basins` directly and filters by
-`superseded_at`.
+[nokken-web PR #111](https://github.com/arnefl/nokken-web/pull/111)
+— "schema: weather tables re-keyed to gauge (008)" — which re-keys
+`weather_observations` and `weather_forecasts` from `section_id`
+to `gauge_id` and adds a nullable `basin_version INTEGER` audit
+column on both tables. Phase 3b's query layer reads gauge-keyed
+weather rows directly; `section_id → gauge_id` resolution moves to
+read time via a join through `sections`, and `basin_version`
+carries forward the catchment polygon version each row was
+aggregated under.
 
-The prior pin (`c18e41a…`, PR #98) introduced the three hypertables
-this repo reads from or (in Phase 6) writes to, and remains in
-effect:
+The prior pin (`e9f1cf8…`, PR #107, migration 007) introduced the
+`basins` table and `basins_current` view — still in effect, and the
+`basin_version` column added by 008 references that versioning
+scheme. The pin before that (`c18e41a…`, PR #98) introduced the
+three hypertables this repo reads from or (in Phase 6) writes to,
+and remains in effect:
 
 - `forecasts` — flow / level forecast outputs owned here; multi-lead,
   multi-quantile, multi-model-version.
 - `weather_observations` — hourly basin-mean historical forcing
   written by nokken-data; read here as training / hindcast input.
+  Re-keyed to `gauge_id` by 008.
 - `weather_forecasts` — hourly basin-mean weather forecasts written
-  by nokken-data; read here as live-forecast forcing.
+  by nokken-data; read here as live-forecast forcing. Re-keyed to
+  `gauge_id` by 008.
 
 Earlier still, `c0f0ff7…` (2026-04-22; tracked only in sibling
 `nokken-data/SCHEMA_COMPAT.md`, never landed here) predated
