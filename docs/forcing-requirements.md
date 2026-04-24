@@ -611,3 +611,50 @@ the historical path, area-weighted over the same basin polygon.
 
 No code changes land in this PR — this is specification only. The
 fetcher PR in nokken-data implements against the above.
+
+## 9. seNorge diligence (negative result)
+
+A Shyft-os example config surfaced during Phase 2 pointing
+`SeNorgeDataRepository` at `seNorge2_PREC1d_dataset_1957_2015_compressed.nc`
+and asking it for four variables — precipitation, wind_speed,
+relative_humidity, radiation — raising the possibility that a seNorge
+variant published radiation at long-record cadence and might reopen
+§4.1's historical-obs decision. Investigation closes the question as
+negative.
+
+**Shyft side — synthesis, not real reads.** `SeNorgeDataRepository` at
+pinned SHA `8c038f0068f3d3180072554fbdfc387bb3778a01` reads only
+`mean_temperature` and `precipitation_amount` from the netCDF
+([split of real vs dummy variables, L88–L119](https://gitlab.com/shyft-os/shyft/-/blob/8c038f0068f3d3180072554fbdfc387bb3778a01/python/shyft/hydrology/repository/netcdf/senorge_data_repository.py#L88-L119);
+[variable map, L73–L79](https://gitlab.com/shyft-os/shyft/-/blob/8c038f0068f3d3180072554fbdfc387bb3778a01/python/shyft/hydrology/repository/netcdf/senorge_data_repository.py#L73-L79)).
+Wind, humidity, and radiation are hard-coded constants (2.0 m·s⁻¹, 0.6,
+50 W·m⁻² respectively), returned as a single synthetic "station" at
+the bounding-box corner for Shyft to spatially interpolate across the
+cells
+([`dummy_var` constants, L325–L331](https://gitlab.com/shyft-os/shyft/-/blob/8c038f0068f3d3180072554fbdfc387bb3778a01/python/shyft/hydrology/repository/netcdf/senorge_data_repository.py#L325-L331));
+the method docstring names the three synthesised fields explicitly.
+The 4-variable YAML list is a placeholder contract, not a claim that
+seNorge carries the other three.
+
+**MET side — every seNorge variant is T + P only.** seNorge 1, seNorge
+2, and seNorge_2018 are all daily, 1 km, temperature + precipitation
+(seNorge_2018 additionally publishes TN / TX / percentiles / precip
+return-levels derived from the same two primitives)
+([seNorge_2018 Variables](https://github.com/metno/seNorge_docs/wiki/Variables);
+[seNorge ver 2](https://github.com/metno/seNorge_docs/wiki/seNorge-ver-2);
+[seNorge ver 1](https://github.com/metno/seNorge_docs/wiki/seNorge-ver-1)).
+seNorge_snow distributes snow-model outputs (SWE, melt, runoff, snow
+depth) — not meteorological forcings
+([senorgesnow_variables](https://github.com/metno/seNorge_docs/wiki/senorgesnow_variables)).
+Wind appears in the seNorge_2018 pipeline only as an internal NORA10
+input to gauge-undercatch correction; it is not distributed
+([Lussana et al. 2019, ESSD](https://essd.copernicus.org/articles/11/1531/2019/)).
+MET's own wiki redirects users wanting hourly radiation / wind /
+humidity to MET Nordic analysis — the product §4.1 already picked.
+
+**Implication — none.** The §4.1 prior ("seNorge2018 is daily
+temp+precip only") generalises to all seNorge variants; §4's decisions
+stand unchanged. The Shyft `SeNorgeDataRepository` is a
+temperature-and-precipitation reader with constant padding for the
+three PTGSK-required variables it does not actually have, so its
+existence is not evidence that seNorge publishes radiation.
