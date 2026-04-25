@@ -71,7 +71,9 @@ once the sink schema is defined.
   migration, via a `SCHEMA_COMPAT.md` mirroring nokken-data's
   pattern.
 - A query layer in `src/nokken_forecasting/` can read observations,
-  gauges, and sections from the DB against test fixtures. No model
+  gauges, sections, and the Phase 2 weather tables from the DB
+  against test fixtures. ✓ landed in Phase 3b — see
+  `src/nokken_forecasting/queries/` and `docs/queries.md`. No model
   code yet.
 
 **Repos touched.** `nokken-web` (migration + pydantic model),
