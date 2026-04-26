@@ -127,13 +127,43 @@ hindcast window** of 2012-09-01 → 2024-12-31 (Decisions block,
 v4's floor is operator work in `nokken-data` and runs in parallel —
 ~21 h wall-clock at 1.5 s/hour for the ~50,000 missing hours.
 
-**Faukstad observation gap rate.** 180,129 flow rows over the
-26-year span (~228,000 continuous hours expected) work out to
-~6,920 observed h/yr against an 8,760 h/yr ceiling — **~21%
-missing**. Baseline PRs (persistence, recession, lin reg, GBT)
-must tolerate missing-target hours in hindcast scoring: drop them
-from metric computation rather than impute, and report coverage
-alongside KGE / MAE / pinball.
+**Faukstad observation cadence in the test window (2020-01-01 →
+2024-12-31).** A row-interval distribution against
+`observations.value_type = 'flow'` reveals a **mixed-cadence
+series**, not a uniformly-hourly series with random drop-outs:
+
+| Inter-row interval | Occurrences | Reading |
+|---|---|---|
+| 60 min | 17,826 | dominant hourly cadence |
+| 1440 min (24 h) | 575 | daily-cadence publication periods |
+| 120 min | 325 | two-hourly periods |
+| 180 min | 15 | three-hourly periods |
+| 240 / 300 / 780 min | 1 / 1 / 2 | sparse longer single gaps |
+| 236,040 min (~164 d) | 1 | multi-month outage |
+| 452,100 min (~314 d) | 1 | multi-month outage |
+
+Two **multi-month outages totalling ~478 days** account for the
+bulk of the missing-hours figure (~26% of the 5-year test window
+on their own). The remainder is largely cadence variation — the
+575 daily-cadence intervals each cover 24 hours but show as one
+row, and similar for the two- and three-hourly stretches — not
+true outages. Implications:
+
+- **Persistence and recession** trivially handle outages (skip
+  rows where target is null). Recession's event-separation step
+  also needs to refuse to fit across an outage boundary.
+- **Linear regression and GBT** need explicit handling of cadence
+  variation: downsample everything to a common interval (daily,
+  conservative), upsample lower-cadence rows by interpolation
+  (more flexible but interpolated targets aren't real
+  observations), or condition the model on the cadence of the most
+  recent observation. Each baseline PR documents the choice it
+  takes; the comparison report (PR 6) flags the choice in the
+  per-baseline write-up.
+- **Hindcast scoring** drops missing-target rows from metric
+  computation regardless. The two long outages don't break
+  scoring; they narrow the effective test set, which the report
+  surfaces as a coverage column alongside KGE / MAE / pinball.
 
 ### 1.3 Pre-merge inventory queries the operator runs against `nessie`
 
