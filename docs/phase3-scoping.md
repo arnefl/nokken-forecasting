@@ -4,15 +4,12 @@ Sequenced breakdown of Phase 3 against the operator's "~1 month to in
 prod" timeline. Sized for one model on one gauge (Faukstad, gauge id
 12, the six Sjoa sections downstream of it) with the eventual
 all-NVE-gauges-scope deferred. Read top-to-bottom to follow the
-proposal; jump to §5 "Open decisions" for what needs operator
-red-pen.
-
-The doc is a proposal, not a plan-of-record. The Decisions (final)
-block at the end is empty until red-pen closes the §5 questions.
+proposal; jump to the Decisions (final) block for what subsequent PR
+prompts reference.
 
 Source material:
 
-- `ROADMAP.md` Phase 3 — `ROADMAP.md:124-151`.
+- `ROADMAP.md` Phase 3 — `:124-151`.
 - `docs/scoping-genesis.md` Decisions (final) — `:27-72`; baselines
   survey §5 — `:425-541`.
 - `docs/forcing-requirements.md` Decisions (final) — `:28-86`;
@@ -21,6 +18,62 @@ Source material:
 - nokken-web migrations 003 (`forecasts`), 007 (`basins`), 008
   (`weather_*` rekey).
 - nokken-data `MIGRATION_PLAN.md`, `docs/operations/historical-backfill.md`.
+
+---
+
+## Decisions (final)
+
+Compact reference for downstream PR prompts. Each bullet closes one
+§5 question; longer prose with rationale lives in §5.
+
+- **In-prod definition.** "In prod" = daily rows in `forecasts` for
+  Faukstad written by a scheduled forecast job. nokken-web UI
+  rendering of those rows is OUT of this 1-month sprint; the rows
+  are accessible via SQL or the existing nokken-web read endpoints.
+- **Prod milestone.** PR 1 (persistence baseline) + PR 2 (scheduled
+  forecast job + operator runbook) = "in prod." Better baselines
+  (PRs 3–5) are quality improvements landing *after* the milestone.
+- **Hindcasts: DB rows, not parquet.** Hindcast rows land in the
+  same `forecasts` table as live forecasts, distinguished by a
+  wall-clock `model_run_at` column (live: `model_run_at ≈
+  issue_time`; hindcast: `model_run_at ≫ issue_time`). Joinable
+  with `observations` for skill scoring; readable by any downstream
+  tool without a separate format.
+- **Schema gap → PR 0 in nokken-web (BLOCKER for PR 1).** Migration
+  003 has `model_version` as the model identifier
+  (`003_forecasts.sql:39`); it does NOT carry a wall-clock execution
+  timestamp. A new `model_run_at TIMESTAMP NOT NULL` column on
+  `forecasts` lands in nokken-web before PR 1. See §3.2 and §4.0.
+- **Model-identifier convention.** `model_version TEXT` (existing
+  column) carries `<scheme>_v<N>` — `persistence_v1`, `recession_v1`,
+  `linear_v1`, `lgb_v1`. Bump the integer when the trained artifact
+  changes; the scheme prefix stays stable.
+- **Multi-gauge scope.** Faukstad only (gauge id 12, six Sjoa
+  sections) for *all* baselines this sprint. Multi-gauge fan-out is
+  post-Phase-3; the harness signature `evaluate(model, catchments,
+  window)` already takes a list, so expansion is a configuration
+  change, not a refactor.
+- **Hindcast train/test split.** Train 2012-09-01 → 2019-12-31
+  (matches MET Nordic v4 floor); test 2020-01-01 → 2024-12-31. Per
+  `forcing-requirements.md` and `scoping-genesis.md:48-53`. Operator
+  extends MET v4 backfill to cover the full window in parallel with
+  PR 1 — ~21 h wall-clock at 1.5 s/hour for the missing ~50,000 hours.
+- **Forecast horizon.** 7 days, hourly. Lead 0–58 h: MET Nordic
+  Forecast 1 km (gridded). Lead 58 h–168 h: MET locationforecast
+  (point). Per-variable nuance in `forcing-requirements.md` §4.2.
+  Lead-time-to-source mapping is a PR 4 concern (first
+  forcing-input baseline); persistence and recession don't consume
+  forecast forcings.
+- **Comparison report.** PR 6 reads hindcast rows out of `forecasts`
+  via the existing query layer + a new `get_forecasts` reader,
+  joins to observations, computes per-baseline KGE / MAE /
+  pinball@0.9 per lead-time, renders to
+  `docs/phase3-baselines-comparison.md`.
+- **Operator runbook for the prod job.** Folds into PR 2
+  (`docs/deploy.md`); not a separate later PR.
+- **Live DB inventory.** Local Postgres unreachable at scoping
+  time; §1.2 lists the exact inspect-CLI queries the operator runs
+  against `nessie` and folds the numbers in pre-merge.
 
 ---
 
@@ -36,7 +89,7 @@ Source material:
 | `gauges` | nokken-web 001 (`001_reference_tables.sql:39-49`) | `gauge_id` | — | static metadata |
 | `sections` | nokken-web 001 (`001_reference_tables.sql:80-103`) | `section_id` | — | section→gauge linkage and `flowMin`/`flowMax` thresholds |
 | `basins` / `basins_current` | nokken-web 007 (`007_basins.sql:42-127`) | `(gauge_id, version)` | — | basin polygon for forcing aggregation; `basin_version` is the audit pin written into weather rows |
-| `forecasts` | nokken-web 003 (`003_forecasts.sql:32-65`) | partial-unique on quantile (`:49-54`) | `valid_time` | the Phase-3 sink — already exists, empty |
+| `forecasts` | nokken-web 003 (`003_forecasts.sql:32-65`) | partial-unique on quantile (`:49-54`) | `valid_time` | the Phase-3 sink — exists but missing `model_run_at` column (§3.2) |
 
 ### 1.2 Production data state (Faukstad, gauge id 12)
 
@@ -58,20 +111,54 @@ Per the operator's status as of 2026-04-26 and
 - **`weather_forecasts`** — locationforecast 2.0 + MET Nordic
   Forecast 1 km fetchers are merged in nokken-data and slated to
   run live. Population state on `nessie` requires an inspect-CLI
-  query when next reachable; this scoping doc assumes the live
-  feeds are populating per-cycle within Phase-3 horizons but does
-  not anchor any LOC estimate on it.
+  query when next reachable.
 
 The Faukstad weather backfill **does not yet cover the agreed
-hindcast window** of 2012-01 → 2024-12 (`scoping-genesis.md:48-53`).
-The 18-month window supports a persistence sanity-check (which
-needs only flow observations) and an early recession-curve fit; it
-does not yet support multi-year hindcast scoring of any
-weather-driven baseline. Extending the backfill to MET Nordic v4's
-floor (2012-09-01) is operator work in `nokken-data` and runs in
-parallel — see §4 PR cadence and §5 open decision A.
+hindcast window** of 2012-09-01 → 2024-12-31 (Decisions block,
+`scoping-genesis.md:48-53`). Extending the backfill to MET Nordic
+v4's floor is operator work in `nokken-data` and runs in parallel —
+~21 h wall-clock at 1.5 s/hour for the ~50,000 missing hours.
 
-### 1.3 Query layer in `src/nokken_forecasting/queries/`
+### 1.3 Pre-merge inventory queries the operator runs against `nessie`
+
+CC could not reach a live Postgres at scoping time
+(local instance not running; production behind operator-only
+network). The exact numbers below get folded into this section
+before PR 0 / PR 1 merge. Run via `nokken-forecasting inspect query
+"<SQL>"` (or `psql` directly) against `nessie`:
+
+```sql
+-- Faukstad observations span and density
+SELECT value_type, MIN(time) AS min_t, MAX(time) AS max_t, COUNT(*) AS n
+FROM observations
+WHERE gauge_id = 12
+GROUP BY value_type;
+
+-- Faukstad weather observations span per variable per source
+SELECT variable, source, MIN(time) AS min_t, MAX(time) AS max_t,
+       COUNT(*) AS n, MIN(basin_version) AS min_v, MAX(basin_version) AS max_v
+FROM weather_observations
+WHERE gauge_id = 12
+GROUP BY variable, source;
+
+-- Faukstad forecast forcings — live cycle population
+SELECT variable, source,
+       COUNT(DISTINCT issue_time) AS cycles,
+       MIN(issue_time) AS first_cycle, MAX(issue_time) AS last_cycle,
+       COUNT(*) AS n
+FROM weather_forecasts
+WHERE gauge_id = 12
+GROUP BY variable, source;
+
+-- forecasts table (should be empty pre-PR-1)
+SELECT COUNT(*) FROM forecasts;
+```
+
+The first three numbers anchor §2's hindcast-window feasibility
+calls and the §4 PR-cadence assumptions. The fourth confirms the
+sink starts empty.
+
+### 1.4 Query layer in `src/nokken_forecasting/queries/`
 
 Phase 3b landed six readers (`docs/queries.md`,
 `src/nokken_forecasting/queries/__init__.py:46-64`). All take an
@@ -84,127 +171,107 @@ ranges:
 | `get_gauges` | `queries/gauges.py:46-72` | one row per gauge; `gauge_id`, name, `has_flow`, `has_level`, `source`, `sourcing_key`, `drainage_basin` |
 | `get_sections` | `queries/sections.py:64-98` | section row including `gauge_id`, `gauge_sub`, `flowMin`/`flowMax` |
 | `get_observations` | `queries/observations.py:38-73` | `(time, gauge_id, value_type, value)`; filters by `gauge_id` (required), time range, optional `value_type` |
-| `get_weather_observations` | `queries/weather.py:76-116` | `(time, gauge_id, variable, value, source, basin_version)`; same time / `value_type` filters plus optional `variables`, `source` |
+| `get_weather_observations` | `queries/weather.py:76-116` | `(time, gauge_id, variable, value, source, basin_version)`; same time filters plus optional `variables`, `source` |
 | `get_weather_forecast_latest_as_of` | `queries/weather.py:119-181` | latest forecast cycle per source as of a given time; emits `(issue_time, valid_time, gauge_id, variable, value, source, quantile, basin_version)` |
 | `get_weather_forecast_at_lead` | `queries/weather.py:184-257` | same shape, indexed for "what did we predict at lead L for time T" — the hindcast read primitive |
 
 Connection lives at `queries/_connection.py:22-42`; the underlying
 read-only pool sets `default_transaction_read_only = on` per
 connection in `db/postgres.py:37-62`. There is no write-capable
-pool yet — Phase 6 will add one for the forecast-sink path.
+pool yet — PR 1 adds one for the forecast-sink path.
 
 What the readers **don't** expose:
 
-- **No upstream-of-X gauge query.** Phase 2b parallel-track work
-  (`ROADMAP.md:85-121`); Phase 3 baselines do not require it.
 - **No `forecasts` reader.** Phase 3 needs both a writer and a
-  reader against `forecasts` (the writer for emitting predictions,
-  the reader for hindcast diagnostics). Both are Phase-3 deliverables,
-  not Phase-3b backfill.
-- **No basin-polygon reader.** Phase 3 baselines consume basin-mean
-  series only (`forcing-requirements.md` §6); raw geometries are not
-  in scope until Phase 4 if Shyft-os is picked.
+  reader against `forecasts`. The reader (`get_forecasts`) is a
+  Phase-3 deliverable — folded into PR 6 (comparison report) since
+  that is the first PR that reads operationally-written rows.
+- **No upstream-of-X gauge query.** Phase 2b parallel-track work
+  (`ROADMAP.md:85-121`); not required for Phase 3.
+- **No basin-polygon reader.** Baselines consume basin-mean series
+  only; raw geometries deferred until Phase 4.
 
-### 1.4 What's missing for baselines
+### 1.5 What's missing for baselines
 
-For each Phase-3 baseline (§2 below) the data inputs are:
+| Baseline | Needs | Have today? |
+|---|---|---|
+| Persistence | flow obs at gauge id 12 | yes (full history) |
+| Recession curve | flow obs at gauge id 12 | yes (full history) |
+| Lin regression | flow obs + lagged P/T at gauge id 12 over hindcast window | partial — P/T 2024-04→2025-10 today; full window after operator backfill extension |
+| GBT | flow obs + 5-variable forcing over hindcast window | same as lin regression |
 
-| Baseline | Needs | Have? | Reader |
-|---|---|---|---|
-| Persistence | flow obs at gauge id 12 | yes (full history) | `get_observations(gauge_id=12, value_type='flow')` |
-| Recession curve | flow obs at gauge id 12 | yes (full history) | same |
-| Lin regression | flow obs + lagged P/T at gauge id 12 over hindcast window | partial (P/T only 2024-04→2025-10 today; full window when backfill extends) | `get_observations` + `get_weather_observations` |
-| GBT | flow obs + 5-variable forcing at gauge id 12 over hindcast window | same as lin reg; needs all five variables | same |
-
-The honest gap: **regression and GBT baselines depend on the
-multi-year MET Nordic v4 weather backfill, not yet run.** The doc
-sequences PRs to land persistence first (no dependency) and pace the
-weather-driven baselines behind the weather backfill (§4).
+Persistence and recession have full inputs as of today. Linear
+regression and GBT depend on the operator-side backfill extension;
+PR cadence in §4 paces those PRs after the backfill is done.
 
 ---
 
 ## 2. Baseline candidates
 
 Four baselines per `scoping-genesis.md` §5 (`:425-541`); listed
-roughly in implementation-cost order. Each row anchors on what the
-first PR landing the baseline contains, not on the full research
-arc behind it.
+roughly in implementation-cost order.
 
 ### 2.1 Persistence
 
 - **Form.** Forecast = current observation, held flat for N hours
-  (deterministic). Optional AR(1) drift fit by OLS on lag-1
-  residuals as a second variant under the same module.
+  (deterministic). Optional AR(1) drift fit by OLS as a second
+  variant under the same module if PR-3 hindcast diagnostics
+  motivate it.
 - **Inputs.** Flow at gauge id 12 only.
-- **Reader.** `get_observations(conn, gauge_id=12, start=…, end=…,
+- **Reader.** `get_observations(conn, gauge_id=12, …,
   value_type='flow')`.
-- **Hindcast metric.** KGE primary + MAE + pinball-loss-at-τ=0.9
-  per `scoping-genesis.md:43-46` and `:533-535`. Persistence is
-  the baseline the other three are scored against (skill against
-  persistence, not against zero); reporting persistence's own KGE
-  is the "is the harness producing sane numbers" check.
-- **Hindcast window.** 2020-01 → 2024-12 per `scoping-genesis.md:48-53`.
-  Persistence does not need the historical weather backfill — it
-  reads only the flow column.
-- **First PR LOC.** ~600 lines including: `baselines/persistence.py`
-  (~80), evaluation harness skeleton `evaluate.py` (~150),
-  `metrics.py` (KGE/MAE/pinball, ~100), `pipelines/forecast_job.py`
-  scaffold + persistence writer (~120), tests (~100), CLI subcommand
-  (~50).
-- **Risk.** Trivial to implement, anchoring value is high. The risk
-  is that the harness shape needs to absorb three more baselines
-  later — biased toward over-design on PR-1. Mitigation: only
-  shape `evaluate(model, catchments, window)` to the
-  scoping-genesis §5.5 contract; don't try to abstract ahead.
+- **Hindcast metric.** KGE primary + MAE + pinball@0.9
+  (`scoping-genesis.md:43-46`, `:533-535`). Skill scored against
+  persistence itself; persistence's own KGE is the harness sanity
+  check.
+- **Hindcast window.** 2020-01 → 2024-12. Persistence does not
+  need the historical weather backfill.
+- **First PR LOC.** ~150–200 (PR 1; minimal — just the baseline,
+  the writer, and a smoke test). Harness/metrics module lands later.
+- **Risk.** Trivial. Anchors the framework, the writer, and the
+  read-back path against a model so simple it cannot be wrong.
 
 ### 2.2 Recession curve
 
 - **Form.** Linear-reservoir Q(t) = Q₀·exp(−t/k) per
-  `scoping-genesis.md:451-466`. One-parameter fit per gauge using
-  `scipy.optimize.curve_fit`; optionally a two-reservoir
-  `k_fast / k_slow` split if the residuals justify it (decide from
-  PR-1 hindcast diagnostics, not in advance).
-- **Inputs.** Flow at gauge id 12 + an event-separation pass
-  (peak detection on observed flow). No weather.
+  `scoping-genesis.md:451-466`. One-parameter fit per gauge via
+  `scipy.optimize.curve_fit`; two-reservoir `k_fast / k_slow`
+  variant only if PR-3 residuals justify it.
+- **Inputs.** Flow at gauge id 12 + event separation. No weather.
 - **Reader.** `get_observations(...)`.
-- **Hindcast metric.** Same trio (KGE / MAE / pinball@0.9). Score
-  separately on recession-limb-only subsets — recession curve is
-  a regime-specific model and its overall hindcast number masks
-  what it is good at.
+- **Hindcast metric.** Same trio. Score separately on
+  recession-limb-only subsets — recession is regime-specific and
+  its overall hindcast number masks what it is good at.
 - **Hindcast window.** 2020-01 → 2024-12.
-- **First PR LOC.** ~250 lines: `baselines/recession.py` (~120),
-  event-separation utility (~50), tests (~60), report addition (~20).
-- **Risk.** Low. The pitfall is treating the precip-driven step
-  response: recession alone gets the dry weeks right and the rain
-  weeks wrong. Honest reporting handles it.
+- **First PR LOC.** ~250 + the harness/metrics module that PR 3
+  introduces (~150) + persistence-hindcast backfill in the same
+  PR (~50) ≈ 450 total.
+- **Risk.** Low. Pitfall: recession alone ignores precip-driven
+  step responses. Honest reporting handles it.
 
 ### 2.3 Linear regression on lagged P, T, Q
 
-- **Form.** Per `scoping-genesis.md:467-489`: lagged precipitation
-  (0–5 days, rolling 3 / 7-day sums), lagged temperature, positive
-  degree-day accumulations as a snowmelt proxy, lagged observed
-  flow, day-of-year sin/cos, antecedent-wetness (30-day rolling P).
-  Ridge regression by default — collinearity is severe between
-  lagged P and rolling sums.
+- **Form.** Per `scoping-genesis.md:467-489`: lagged precipitation,
+  rolling sums (3 / 7-day), positive degree-day accumulations,
+  lagged observed flow, day-of-year sin/cos, antecedent-wetness
+  (30-day rolling P). Ridge by default; Lasso for diagnostic
+  feature ranking.
 - **Inputs.** Flow + temperature + precipitation at gauge id 12
   over the hindcast window. Two of five variables from
   `weather_observations`.
 - **Reader.** `get_observations(...)` + `get_weather_observations(
   variables=['temperature', 'precipitation'])`.
 - **Hindcast metric.** KGE / MAE / pinball@0.9 per lead-time on
-  the lead grid `{1, 3, 6, 12, 24, 48, 72, 120, 168}` h
-  (`scoping-genesis.md:40-41`). Score separately on
-  melt-vs-rain-vs-recession regimes if the residuals point that way.
-- **Hindcast window.** 2020-01 → 2024-12 *if* the historical
-  backfill has reached 2012-01. Without that window the baseline
-  PR can still land technically but with a degraded /
-  short-window hindcast — flag as caveat in the report.
-- **First PR LOC.** ~350 lines: `baselines/linear.py` (~150),
-  feature builder `features.py` (~120), tests (~60), report
-  addition (~20). `scikit-learn` as new dep.
-- **Risk.** Low-medium. The pitfall is mis-specified
-  threshold/saturation non-linearities at peak flows. Ridge is
-  tractable; lasso for diagnostic feature ranking.
+  the grid `{1, 3, 6, 12, 24, 48, 72, 120, 168}` h
+  (`scoping-genesis.md:40-41`).
+- **Hindcast window.** 2020-01 → 2024-12, requires the operator
+  backfill extension to have reached 2012-09-01 by PR 4 merge time.
+- **First PR LOC.** ~350. `scikit-learn` as new dep.
+- **Lead-time-to-source mapping.** Live forecasting at lead 0–58 h
+  uses `met_nordic_forecast_1km` rows; lead 58 h–168 h uses
+  `met_locationforecast_2_complete`. Per-variable nuance (shortwave
+  gap past +66 h) per `forcing-requirements.md:402-405`. Documented
+  here because PR 4 is the first PR that consumes forecast forcings.
 
 ### 2.4 Gradient-boosted trees (LightGBM)
 
@@ -212,48 +279,42 @@ arc behind it.
   §2.3 plus rolling min/max/std (7, 30-day) and static catchment
   attributes from `sections_characteristics`. LightGBM with one
   model per target quantile (`objective='quantile', alpha=τ`) for
-  τ ∈ {0.1, 0.5, 0.9} — native quantile output is the hook for
-  pinball-loss scoring and the multi-quantile rows the `forecasts`
-  table already supports.
+  τ ∈ {0.1, 0.5, 0.9}.
 - **Inputs.** Flow + all five `forcing-requirements.md` §3
-  variables (temperature, precipitation, shortwave, relative
-  humidity, wind speed) at gauge id 12 over the hindcast window.
+  variables at gauge id 12 over the hindcast window.
 - **Reader.** `get_observations(...)` +
   `get_weather_observations(variables=None)` (defaults to all five).
 - **Hindcast metric.** KGE / MAE / pinball@0.9 per lead-time.
-  Pinball is the headline metric here — the GBT is the only
-  baseline emitting native quantiles.
-- **Hindcast window.** 2020-01 → 2024-12, same caveat as §2.3 on
-  multi-year forcing availability.
-- **First PR LOC.** ~450 lines: `baselines/gbt.py` (~200),
-  feature builder reuses §2.3 (~50 of new code), tests (~120),
-  report (~50), tuning sweep harness (~30). `lightgbm` as new dep.
-- **Risk.** Medium. Trees can't extrapolate beyond training; the
-  largest observed flood bounds predictions. Mitigations are spec'd
-  in `scoping-genesis.md:506-510` (log-transform target,
-  physically-meaningful derived features, separate top-decile
-  reporting).
+  Pinball is the headline here — GBT is the only baseline emitting
+  native quantiles.
+- **Hindcast window.** Same as §2.3.
+- **First PR LOC.** ~450. `lightgbm` as new dep.
+- **Risk.** Medium. Trees can't extrapolate beyond training;
+  mitigations spec'd in `scoping-genesis.md:506-510`.
 
 ### 2.5 Cross-cutting harness
 
 A `evaluate(model, catchments, window) → DataFrame(lead, metric,
-catchment)` per `scoping-genesis.md:539-541` lives once, exercised
-by all four. The shape is the
-`forecasts`-table-shape-as-DataFrame: `issue_time` × `valid_time`
-× `lead_hours` × `quantile` × `value`. The harness produces
-parquet hindcast artifacts under
-`artifacts/hindcasts/<model>_<window>.parquet`; **hindcasts are
-not written to the production `forecasts` table** — the table
-holds operationally-issued forecasts only. (This is a proposal —
-see §5 open decision F.)
+catchment)` per `scoping-genesis.md:539-541` lives once in PR 3
+(introduced with recession), exercised by recession, lin
+regression, and GBT in PRs 3–5, then by persistence retroactively
+inside PR 3 to write persistence's hindcast rows.
+
+The harness writes hindcast results **as forecast rows in the
+`forecasts` table** (one row per
+(`issue_time`, `valid_time`, `gauge_id`, `value_type`, `model_version`,
+`quantile`)), distinguished from live forecasts only by
+`model_run_at` ≫ `issue_time`. PR 6 reads them back via a new
+`get_forecasts` reader, joins to `observations`, and renders the
+comparison report.
 
 ---
 
 ## 3. Forecast write contract
 
-The sink schema already exists. nokken-web's `forecasts` table
-landed in migration 003 (`db/postgres/migrations/003_forecasts.sql:32-65`)
-with the seven columns:
+### 3.1 Existing schema (migration 003)
+
+`db/postgres/migrations/003_forecasts.sql:32-65`:
 
 ```
 issue_time     TIMESTAMP NOT NULL
@@ -265,368 +326,308 @@ value          REAL NOT NULL
 model_version  TEXT NOT NULL
 ```
 
-Two partial-unique indexes on the (issue_time, valid_time, gauge_id,
-value_type, model_version) tuple — one for `quantile IS NULL`, one
-for `quantile IS NOT NULL` — let a deterministic and a probabilistic
-row coexist for the same model run. Hypertable on `valid_time` under
-the conditional-promotion pattern.
+Two partial-unique indexes on
+(issue_time, valid_time, gauge_id, value_type, model_version) — one
+for `quantile IS NULL`, one for `quantile IS NOT NULL` — let a
+deterministic and a probabilistic row coexist for the same model
+run. Hypertable on `valid_time`.
 
-### 3.1 Sufficient for Phase-3 baselines as-is
+`model_version` is the model identifier (`:39`); convention
+`<scheme>_v<N>` (`persistence_v1`, `recession_v1`, `linear_v1`,
+`lgb_v1`).
 
-All four baselines fit the existing schema:
+### 3.2 Schema gap — `model_run_at` column (BLOCKER for PR 1)
 
-- Persistence and recession emit `quantile = NULL` rows — one per
-  (issue_time, valid_time, gauge_id, 'flow', `model_version`).
-- Linear regression emits `quantile = NULL` deterministic rows
-  (Ridge has no native quantile output without conformal wrapping).
-- GBT emits one `NULL` row plus three quantile rows per
-  (issue_time, valid_time, gauge_id, 'flow', `model_version`) for
-  τ ∈ {0.1, 0.5, 0.9}.
+The Decisions block resolves hindcasts to land in the `forecasts`
+table alongside live forecasts. The existing schema does not
+distinguish them: `issue_time` carries the forecast's
+"as-of" stamp (used for lead-time arithmetic), but for a hindcast
+that stamp is set to a historical date the model is pretending it
+ran from. There is no column for the wall-clock execution time.
 
-`model_version` carries identity. Proposed convention: `<scheme>_v<N>`
-— `persistence_v1`, `recession_v1`, `linear_v1`, `lgb_v1`. Bump
-the integer when the trained artifact changes; keep the scheme
-prefix stable so a single string identifies the model family.
+Fix: nokken-web migration adds
 
-### 3.2 Schema gaps — none gating Phase 3
+```sql
+ALTER TABLE forecasts
+  ADD COLUMN model_run_at TIMESTAMP NOT NULL DEFAULT NOW();
+```
 
-Three nice-to-haves the table does not carry. None block Phase 3;
-each is flagged as candidate future work for nokken-web.
+Semantics:
+
+- **Live forecast.** `model_run_at ≈ issue_time` (within minutes of
+  the schedule cycle that produced the row).
+- **Hindcast.** `model_run_at ≫ issue_time` (the wall-clock time
+  the hindcast loop wrote the row, possibly years after
+  `issue_time`).
+
+`DEFAULT NOW()` makes the column non-blocking for live writes that
+don't pass it explicitly, and lets any inadvertent legacy row pick
+up a sensible value. The forecast-writer in PR 1 sets it
+explicitly so the contract is unambiguous on the writer side.
+
+**Open design point inside PR 0:** whether `model_run_at` joins the
+unique-index keys (so hindcast reruns coexist) or stays purely
+audit (so reruns require a `model_version` bump). Recommendation:
+purely audit for v1. Reruns bump `model_version` to e.g.
+`persistence_v1_hindcast_2026_05_01`; the wall-clock column is
+audit only. Cheap to relax later if iteration cadence demands it.
+
+### 3.3 Other schema gaps (none gating Phase 3)
 
 - **No `source` column.** `weather_observations` /
   `weather_forecasts` carry one (`008_weather_rekey_to_gauge.sql:64,119`);
   `forecasts` does not. nokken-web's `DESIGN_NOTES.md` requires
-  attribution on Coming-up cards ("forecast · MET / NVE · updated
-  14:00", per the sub-agent inventory of the design doc); the
-  attribution can be derived from `model_version` for v1, or
-  encoded by adding a `source` column under a future migration.
-  v1 derivation is the cheaper option.
-- **No `basin_version` audit column.** `weather_*` tables stamp
-  it; forecasts don't. If a baseline is sensitive to the polygon
-  used to aggregate forcings, reproducibility is currently
-  asymmetric. Acceptable for Phase 3 (the polygon doesn't change
-  per-row — one model run uses one polygon version); flag as
-  future work.
+  attribution on Coming-up cards but those rendering surfaces are
+  out of this sprint per the Decisions block. Derive attribution
+  from `model_version` for v1; revisit when UI rendering lands.
 - **No `models` reference table.** `model_version` is a free-form
-  string. Phase 3 doesn't need a reference table — but Phase 5+
-  (per-section calibrated artifacts, A/B evaluation) will probably
-  want one. Out of scope here.
-- **No hindcast / forecast distinction in the schema.** Resolved
-  by **not writing hindcasts to the production table**. Hindcasts
-  stay as parquet artifacts under `artifacts/hindcasts/` in this
-  repo. The production table holds only operational forecasts.
-  See §5 decision F.
+  string. Phase 3 doesn't need the table; Phase 5+ may.
+- **No `basin_version` audit column.** `weather_*` tables stamp
+  it; `forecasts` doesn't. Acceptable for Phase 3 — one model run
+  uses one polygon — flag as future work.
 
-### 3.3 Lane split for the forecast write path
+### 3.4 Lane split
 
 | Concern | Lane |
 |---|---|
-| `forecasts` table DDL | nokken-web |
+| `forecasts` table DDL (incl. PR 0 `model_run_at` column) | nokken-web |
 | `models` reference table (future) | nokken-web |
-| `get_forecasts()` query in `api/src/nokken/db/queries.py` | nokken-web |
-| Coming-up rendering, chart data assembly | nokken-web |
+| `get_forecasts()` query in `api/src/nokken/db/queries.py` (UI side) | nokken-web (out of sprint) |
+| Coming-up rendering, chart data assembly | nokken-web (out of sprint) |
 | Forecast generation (training, hindcast, scheduled run) | nokken-forecasting |
-| Writer pool against `forecasts` (separate from the read-only pool in `db/postgres.py`) | nokken-forecasting |
-| Systemd unit for the forecast job | nokken-forecasting |
-| MET Nordic v4 historical weather backfill extension (2012-09 → 2024-04) | nokken-data (operator action) |
-
-The nokken-web read-side rendering of forecasts is **flagged as
-open**: it is technically the path that takes the first
-production-written forecast row and lights up the user-facing
-"Coming up" bucket, but the nokken-web sub-agent inventory shows
-the surface is currently a stub (`api/src/nokken/services/whats_up.py:95`
-returns `coming_up=[]` hardcoded; `routes/section.py:297-302`
-fills the forecast chart layer with `[None]`). Whether that
-work happens within this 1-month sprint is §5 decision E.
+| `get_forecasts` reader for the comparison report | nokken-forecasting (PR 6) |
+| Writer pool against `forecasts` | nokken-forecasting (PR 1) |
+| Systemd unit + operator runbook | nokken-forecasting (PR 2) |
+| MET Nordic v4 historical backfill extension (2012-09 → 2024-04) | nokken-data (operator action) |
 
 ---
 
-## 4. Sequenced PR breakdown — ~3-4 weeks
+## 4. Sequenced PR breakdown — ~3-4 weeks, 6 PRs (+1 in nokken-web)
 
-Each PR is per-repo and one-task-per-PR per the cross-repo
-convention in `CLAUDE.md`. Cross-repo coordination flows through
-this doc; nothing in the sequence bundles repos. LOC estimates
-include tests; "added lines" not "diff lines".
+Per-repo, one task per PR. Cross-repo coordination flows through
+this doc.
 
-### 4.1 Week 1 — vertical slice to first row
+### 4.0 PR 0 — nokken-web: add `model_run_at` to `forecasts` (BLOCKER)
 
-#### PR 1 — Phase 3a-i: persistence baseline + harness skeleton
+- **Repo.** `nokken-web`.
+- **Scope.** New migration (next sequence number after 010) that
+  `ALTER TABLE forecasts ADD COLUMN model_run_at TIMESTAMP NOT NULL
+  DEFAULT NOW()`. Bump pydantic `Forecast` model in
+  `api/src/nokken/models/forecasts.py` to add the field. No index
+  changes (the column is audit-only per §3.2).
+- **Estimated LOC.** ~50.
+- **Lands.** Column on the production schema; pydantic model bump.
+  `nokken-forecasting` bumps `SCHEMA_COMPAT.md` to the post-PR-0
+  SHA in PR 1.
+- **Dependencies.** None.
+- **Gates.** PR 1.
+
+### 4.1 PR 1 — Phase 3a: persistence baseline + writer + first row
 
 - **Repo.** `nokken-forecasting`.
-- **Scope.** Module skeleton (`baselines/`, `evaluate.py`,
-  `metrics.py`, `pipelines/forecast_job.py`); persistence baseline
-  (`baselines/persistence.py`) emitting deterministic flat-line
-  forecasts; metrics (KGE, MAE, pinball@0.9); harness signature
-  `evaluate(model, catchments, window) → DataFrame`; CLI subcommand
+- **Scope.** Persistence baseline (`baselines/persistence.py`)
+  emitting deterministic flat-line forecasts over the 7-day
+  horizon at hourly resolution. CLI subcommand
   `nokken-forecasting forecast persistence --gauge-id 12
-  --issue-time <iso>` that writes one `model_version='persistence_v1'`
-  forecast row to `nessie`'s `forecasts` table over the agreed
-  7-day × hourly horizon. Adds writer-capable pool variant in
-  `db/postgres.py` (no read-only init; runs under a write-scoped
-  role distinct from `nokken_ro`).
-- **Deps.** `scipy` (for KGE / fitting utilities later), no
-  ML deps yet.
-- **Estimated LOC.** ~600.
+  --issue-time <iso>` that writes
+  `model_version='persistence_v1'` rows to `nessie`'s `forecasts`
+  table with `model_run_at = NOW()`. Adds writer-capable pool
+  variant in `db/postgres.py` (no read-only init; runs under
+  `nokken_forecast_writer` role, see §5). Bumps
+  `SCHEMA_COMPAT.md` to the post-PR-0 SHA. Smoke test against the
+  integration-fixture Postgres.
+- **Deps.** `scipy` (downstream baselines need it; cheap to add now).
+- **Estimated LOC.** ~150–200.
 - **Lands in DB.** First `forecasts` rows for Faukstad at
   `model_version = 'persistence_v1'`.
-- **Dependencies.** None on prior Phase-3 PRs. Requires nokken-web
-  migration 003 already applied (it is) and a write-scoped DB role
-  (open decision G).
-- **Phase 3 anchor.** This is Phase 3a-i per the user prompt — the
-  smallest PR that proves the framework, the writer, and the read
-  path against a model so trivial we cannot get the model wrong.
+- **Dependencies.** PR 0.
+- **Out of scope.** Hindcast harness, metrics module, comparison
+  report — all land in PR 3 alongside recession.
 
-#### PR 2 — Phase 3a-ii: hindcast harness + persistence hindcast report
+### 4.2 PR 2 — Phase 3b: scheduled forecast job + operator runbook (PROD MILESTONE)
 
 - **Repo.** `nokken-forecasting`.
-- **Scope.** Decouple `evaluate` from PR-1's writer path; accept
-  any callable `model(history, forcing) → forecast`. Skill-score
-  helper `skill_against_persistence(...)`. Per-lead-time scoring on
-  the `{1, 3, 6, 12, 24, 48, 72, 120, 168}` h grid. First report
-  `docs/phase3-baselines-comparison.md` containing only persistence
-  numbers (the table will grow as PRs 4–6 add baselines). Hindcast
-  artifacts written to `artifacts/hindcasts/persistence_v1.parquet`;
-  not written to the `forecasts` table.
-- **Deps.** none new.
-- **Estimated LOC.** ~300.
-- **Lands.** Parquet artifact + report skeleton.
+- **Scope.** `pipelines/forecast_job.py` runs PR 1's persistence
+  baseline on a schedule against `nessie`. CLI:
+  `nokken-forecasting run forecast_job` (mirroring nokken-data's
+  pattern, `ROADMAP.md:219-220`). Systemd unit
+  `deploy/nokken-forecasting-job.service` + timer aligned to
+  daily cadence (operator can tighten to per-NWP-cycle later — see
+  §5 C). Operator runbook `docs/deploy.md` covering install /
+  start / stop / log inspection / incident response. Config
+  plumbing for `POSTGRES_DSN` write-role and the schedule.
+- **Estimated LOC.** ~300–400.
+- **Lands in DB.** Daily Faukstad forecast rows in `forecasts`.
+  **This is the "in prod" milestone.**
 - **Dependencies.** PR 1.
 
-### 4.2 Week 2 — cover one weather-driven baseline
+### 4.3 Operator-driven (parallel with PRs 1-2): MET v4 backfill extension
 
-#### PR 3 — Phase 3b: recession-curve baseline
+- **Not a code PR.** Operator runs `nokken-data metno historical
+  --gauge-id 12 --start 2012-09-01T00Z --until 2024-04-01T00Z`
+  per `historical-backfill.md` in tmux/caffeinate sessions.
+- **Wall-clock.** ~21 h serial; resumable; can be split across
+  multiple sessions.
+- **Lands in DB.** Faukstad `weather_observations` covering
+  2012-09 → 2024-04 (stitched onto the existing 2024-04 → 2025-10).
+- **Gates.** PR 4 (linear regression) — the regression baseline
+  needs the full hindcast window to score over.
 
-- **Repo.** `nokken-forecasting`.
-- **Scope.** `baselines/recession.py` with linear-reservoir fit
-  per gauge via `scipy.optimize.curve_fit`; event-separation
-  utility for recession-limb scoring; harness extension to score
-  on regime-conditional subsets; report addition.
-- **Deps.** none new (`scipy` from PR 1).
-- **Estimated LOC.** ~250.
-- **Lands.** Hindcast artifact `recession_v1.parquet`; updated
-  comparison report; **no production `forecasts` rows yet for this
-  model** — the operator decides when (if) to schedule it for
-  production via the §5 decision D.
-- **Dependencies.** PR 2 for the harness.
-
-**Parallel operator work, not a PR in this repo.** Extend the MET
-Nordic v4 weather backfill from 2024-04 back toward 2012-09. The
-`nokken-data metno historical` CLI is resumable
-(`historical-backfill.md:79-86`); operator runs it in tmux/caffeinate
-sessions. ~47 hours of fetch time at 1.5 s/hour for the full
-13-year range; can be split. Lin regression and GBT (PRs 4 and 5)
-need this window to score over.
-
-### 4.3 Week 3 — weather-driven baselines
-
-#### PR 4 — Phase 3c: linear-regression baseline + feature builder
+### 4.4 PR 3 — Phase 3c: recession baseline + harness + persistence hindcast
 
 - **Repo.** `nokken-forecasting`.
-- **Scope.** Feature-engineering module (`features.py`) producing
-  the `scoping-genesis.md` §5.3 lag / rolling / DOY feature set
-  from `get_weather_observations` + `get_observations` outputs;
-  `baselines/linear.py` with Ridge by default and Lasso as
-  diagnostic. `scikit-learn` as new dep.
-- **Deps.** `scikit-learn`.
+- **Scope.** `baselines/recession.py` with linear-reservoir fit per
+  gauge (`scipy.optimize.curve_fit`). Event-separation utility for
+  recession-limb scoring. **Introduces the harness:** `evaluate.py`
+  with `evaluate(model, catchments, window) → DataFrame(lead,
+  metric, catchment)`. Metrics module (`metrics.py`) covering KGE,
+  MAE, pinball@0.9. Harness writes hindcast rows directly to
+  `forecasts` (`model_run_at = NOW()`, `issue_time` = the as-of
+  timestamp the model is pretending it ran from). Backfills
+  persistence hindcast rows over the test window in the same PR
+  using the new harness.
+- **Estimated LOC.** ~450 (recession ~150, harness ~150, metrics
+  ~100, persistence-hindcast wiring ~50).
+- **Lands in DB.** Hindcast rows for `model_version =
+  'persistence_v1_hindcast_<date>'` and
+  `'recession_v1_hindcast_<date>'` over 2020-01 → 2024-12.
+- **Dependencies.** PR 2.
+
+### 4.5 PR 4 — Phase 3d: linear-regression baseline
+
+- **Repo.** `nokken-forecasting`.
+- **Scope.** `features.py` producing the `scoping-genesis.md` §5.3
+  feature set from `get_observations` + `get_weather_observations`.
+  `baselines/linear.py` with Ridge by default; Lasso as
+  diagnostic. Lead-time-to-source mapping for live forcings (0–58 h
+  → `met_nordic_forecast_1km`; 58 h–168 h →
+  `met_locationforecast_2_complete`) wired into the feature
+  builder for the live path; hindcast uses
+  `met_nordic_analysis_v4` exclusively. `scikit-learn` as new dep.
 - **Estimated LOC.** ~350.
-- **Lands.** Hindcast artifact `linear_v1.parquet`; updated
-  comparison report.
-- **Dependencies.** PR 2 (harness), PR 3 (regime utilities are
-  reusable). Hindcast skill numbers depend on how far back the
-  weather backfill has reached at PR-merge time — flag in the
-  report.
+- **Lands in DB.** `linear_v1_hindcast_<date>` rows.
+- **Dependencies.** PR 3 (harness); operator backfill extension
+  reaching 2012-09-01.
 
-#### PR 5 — Phase 3d: GBT baseline (LightGBM)
+### 4.6 PR 5 — Phase 3e: GBT baseline (LightGBM)
 
 - **Repo.** `nokken-forecasting`.
 - **Scope.** `baselines/gbt.py` with three quantile models per
-  `scoping-genesis.md:500-503`; reuses PR-4 feature builder; native
-  quantile output threaded through the harness so the
-  pinball-at-τ=0.9 metric scores against three real τ rows;
-  log-transform target option; top-decile-events separate scoring.
-  `lightgbm` as new dep.
-- **Deps.** `lightgbm`.
+  `scoping-genesis.md:500-503`; reuses PR 4's feature builder;
+  native quantile output threaded through the harness so pinball
+  scoring scores against three real τ rows. `lightgbm` as new dep.
 - **Estimated LOC.** ~450.
-- **Lands.** Hindcast artifact `lgb_v1.parquet`; updated comparison
-  report; **first quantile rows in `forecasts`** when run via the
-  `forecast` CLI at `model_version = 'lgb_v1'`.
+- **Lands in DB.** `lgb_v1_hindcast_<date>` rows including the
+  three τ ∈ {0.1, 0.5, 0.9} quantile rows per (issue, valid)
+  tuple.
 - **Dependencies.** PR 4.
 
-### 4.4 Week 4 — comparison + production scheduling
-
-#### PR 6 — Phase 3e: comparison report + ship-to-prod recommendation
+### 4.7 PR 6 — Phase 3f: comparison report
 
 - **Repo.** `nokken-forecasting`.
-- **Scope.** Final `docs/phase3-baselines-comparison.md` with all
-  four baselines on KGE / MAE / pinball@0.9 per lead-time; one
-  recommendation for which baseline goes to scheduled prod (§5
-  decision D); explicit list of failure regimes per baseline.
-  No code changes — a docs PR. Picks a single
-  `model_version` to schedule.
-- **Estimated LOC.** ~150 (mostly markdown).
-- **Lands.** Comparison report. The operator's pick from the §5
-  decision D closes the choice for PR 7.
-- **Dependencies.** PRs 2–5.
+- **Scope.** New `get_forecasts` reader in `queries/forecasts.py`
+  matching the §1.4 reader conventions. Comparison script joins
+  hindcast rows to `observations`, computes per-baseline KGE / MAE
+  / pinball@0.9 per lead-time on the
+  `{1, 3, 6, 12, 24, 48, 72, 120, 168}` h grid. Renders
+  `docs/phase3-baselines-comparison.md` with one table per metric.
+  No new schema; no new DB writes.
+- **Estimated LOC.** ~300 (reader ~80, scoring ~120, report
+  generation + tests ~100).
+- **Lands.** Markdown report; the operator decides which baseline
+  becomes the prod default after PR 6 (initially `persistence_v1`
+  per PR 2).
+- **Dependencies.** PRs 3–5.
 
-#### PR 7 — Phase 3f: scheduled forecast job (nokken-forecasting)
-
-- **Repo.** `nokken-forecasting`.
-- **Scope.** `pipelines/forecast_job.py` runs the chosen baseline
-  on a schedule against `nessie`. CLI: `nokken-forecasting run
-  forecast_job` (mirroring nokken-data's pattern per
-  `ROADMAP.md:219-220`). Systemd unit
-  `deploy/nokken-forecasting-job.service` + a operator runbook
-  `docs/deploy.md` covering start / stop / rotate / incident response.
-  Issue-time aligned with MET forecast cycles (open decision §5
-  decision C).
-- **Estimated LOC.** ~400.
-- **Lands.** Daily / per-cycle forecast rows in `forecasts` for
-  Faukstad. The "1 month to in prod" goal hits here.
-- **Dependencies.** PR 6.
-
-### 4.5 Cross-repo PRs flagged but not pre-committed
-
-- **nokken-web: `get_forecasts()` query + Coming-up rendering.**
-  Implementation only valuable once PR 1 has written rows. Could
-  land in week 2 or 3 depending on §5 decision E. ~250 LOC. No
-  schema change required. **Out of scope of this 1-month sprint
-  by default; flag for operator's call.**
-- **nokken-data: 13-year weather backfill extension.** Operator
-  action, not a code PR.
-
-### 4.6 Total scope
+### 4.8 Total scope
 
 | Repo | PRs | Estimated LOC |
 |---|---|---|
-| `nokken-forecasting` | 7 | ~2,500 |
-| `nokken-web` (optional read path) | 1 | ~250 |
+| `nokken-web` | 1 (PR 0) | ~50 |
+| `nokken-forecasting` | 6 (PRs 1–6) | ~2,000 |
 | `nokken-data` | 0 (operator action) | — |
 
-Per-PR ceiling is well under the 500-LOC / 8-file CLAUDE.md
-guideline once tests are accounted for; PR 1 (~600 LOC) is the
-single PR that flirts with it and is sized that way because the
-module skeleton is one-time cost.
+PR 0 unblocks PR 1; the prod milestone hits at end of week 2 with
+PR 1 + PR 2 merged. Quality-improvement PRs 3–5 land through weeks
+3–4. PR 6 closes the sprint with the comparison report.
 
 ---
 
-## 5. Open decisions for operator red-pen
+## 5. §5 questions — resolved
+
+Each question below is the operator's red-pen call. Numbering kept
+for traceability with the prior version of this doc.
 
 ### A. Multi-gauge baselines now or later?
 
-Faukstad first (gauge id 12, six Sjoa sections). The new MET
-historical fetcher writes all-gauges-per-hour, so the per-gauge
-marginal cost of operationalising more gauges is lower than at
-Phase-2-spec time. Still, baselines are validated against
-hindcast skill at one gauge before the same model class is rolled
-out to others.
+**Resolved: Faukstad-only this sprint.** All baselines this sprint
+operate on gauge id 12 (six Sjoa sections downstream). The MET
+historical fetcher already writes all-gauges-per-hour, so the
+future expansion is a query/loop change, not new infrastructure.
+Multi-gauge fan-out is post-Phase-3.
 
-- **Proposal.** Phase 3 stays scoped to Faukstad. Multi-gauge
-  rollout is a Phase-5-equivalent concern that opens after Phase
-  4 framework choice. The Phase 3 evaluation harness signature
-  `evaluate(model, catchments, window)` already takes `catchments`
-  as a list, so going multi-gauge is a configuration change, not
-  a refactor.
+### B. Hindcast train/test split
 
-### B. Hindcast train/test split — 2012-2019 / 2020-2024 unchanged?
-
-`scoping-genesis.md:48-53` carries the agreed 2012-01-2019-12 /
-2020-01-2024-12 split, with training start bounded by MET Nordic
-v4's hourly availability floor (2012-09-01).
-
-- **Proposal.** Keep as-is. The recent-window-as-test rationale
-  ("that is the climatology production will face") is correct;
-  the only honest reason to revisit would be if the multi-year
-  weather backfill discovers a precipitation step-change worse
-  than the 2016-11-08 known caveat in `forcing-requirements.md:194-198`.
-  Re-litigate on data, not in advance.
+**Resolved: train 2012-09-01 → 2019-12-31; test 2020-01-01 →
+2024-12-31.** Train start aligned to MET Nordic v4's archive floor
+per `forcing-requirements.md`. Operator extends the MET v4 backfill
+to cover the full window in parallel with PR 1 (~21 h wall-clock).
 
 ### C. Forecast horizon and cycle alignment
 
-7-day × hourly horizon with hindcast scoring at lead-times
-{1, 3, 6, 12, 24, 48, 72, 120, 168} h is closed
-(`scoping-genesis.md:40-41`). Cycle alignment is open decision 10
-in `scoping-genesis.md:705-707` (deferred to end of Phase 3).
-
-- **Proposal.** Align the scheduled forecast job (PR 7) to MET's
-  Nordic-area NWP cycles at 00 / 06 / 12 / 18 UTC plus a 30-minute
-  lag for forcing fetcher catch-up. Four runs/day. Re-litigate to
-  once-daily if four runs/day is operational overkill — a
-  configuration change in the systemd unit, not a redesign.
+**Resolved: 7 days hourly. Live-forcing source by lead: 0–58 h →
+`met_nordic_forecast_1km`; 58 h–168 h →
+`met_locationforecast_2_complete`.** Documented in PR 4's design;
+not bundled into PRs 1–3 (those baselines don't consume forecast
+forcings). Cycle alignment for the scheduled job lands in PR 2 as
+a single daily cadence; per-NWP-cycle (4×/day) cadence is a
+configuration tightening that can ship later.
 
 ### D. Which baseline ships to production?
 
-Phase 3 produces four baselines. Phase 6 (the production job)
-runs one. The §4 sequence proposes the operator chooses at PR 6
-after seeing all four hindcast numbers.
+**Resolved: persistence ships first (PR 2 = "in prod"); better
+baselines replace it after PR 6.** The original "all baselines
+before prod" framing is rebalanced: persistence gets to prod in
+week 2 because the framework, the writer, the schedule, and the
+runbook are the load-bearing pieces; the model behind them is
+swappable. The operator picks the prod default at end-of-PR-6
+based on hindcast metrics in the comparison report.
 
-- **Proposal.** Default to the highest-KGE baseline at lead 24 h
-  on the agreed test window, breaking ties on MAE. If the GBT's
-  pinball-at-τ=0.9 advantage is material (>20% improvement over
-  the next baseline) it wins outright on the high-flow-tail-skill
-  argument from `scoping-genesis.md:43-46`. Persistence is a valid
-  shipped baseline if no other model beats it — in which case the
-  Phase-4 framework evaluation has more leverage than it does
-  today.
+### E. Does nokken-web's read-side rendering of forecasts ship in this sprint?
 
-### E. Does nokken-web's read-side rendering of forecasts ship in the same sprint?
+**Resolved: out of scope.** "In prod" = daily rows in `forecasts`
+written by the scheduled job (Decisions block). UI rendering of
+those rows in nokken-web's "Coming up" bucket and section chart is
+follow-up work, not a Phase-3 deliverable.
 
-The chart and Coming-up surfaces in nokken-web are stubs
-(`services/whats_up.py:95`, `routes/section.py:297-302`). Once
-PR 1 writes rows, the data exists; the UI does not yet render
-it. Lighting up that surface is one nokken-web PR (~250 LOC) but
-not a forecasting concern.
+### F. Hindcasts in `forecasts` or as parquet?
 
-- **Proposal.** **Out of scope for this 1-month sprint.** The
-  forecasting-side goal is "rows in the table"; the rendering is
-  follow-on work and gates on operator priority. Operator can
-  override and add it in week 3 or 4 if it fits.
-
-### F. Hindcasts in `forecasts` or as parquet artifacts?
-
-A hindcast is a forecast issued "as if" at a past time t for
-t+lead, scored against observed. The `forecasts` table can
-technically hold them — `issue_time` doesn't constrain to "now".
-The cost is conflating production forecasts and research
-artifacts in one table that nokken-web reads from.
-
-- **Proposal.** **Hindcasts stay as parquet artifacts in
-  `nokken-forecasting/artifacts/hindcasts/`.** Production
-  `forecasts` table holds only operationally-issued forecasts.
-  This avoids a `is_hindcast` schema bump and keeps the read
-  path semantically clean.
+**Resolved: in `forecasts`.** Distinguished from live forecasts
+by `model_run_at` (introduced by PR 0). Joinable with
+`observations` for skill scoring; readable by any downstream
+tool. Parquet is rejected as premature optimisation — a separate
+artifact format adds operational surface without buying anything
+the DB doesn't already give.
 
 ### G. Write-scoped DB role for forecast writes?
 
-The query layer's read-only pool runs under `nokken_ro`
-(per `CLAUDE.md` Secret hygiene). The forecast writer needs a
-distinct role with INSERT (and possibly UPDATE for restart
-semantics) on `forecasts` only. Adding the role is a
-nokken-web operator action against `nessie`.
-
-- **Proposal.** Operator creates a `nokken_forecast_writer` role
-  with `INSERT, UPDATE, DELETE ON forecasts` and `SELECT` on the
-  read tables, scoped to the public schema. The role lives only
-  on production deploy units; local dev keeps using `nokken_ro`
-  (no writes locally). Local integration tests already use a
-  writable connection per `tests/integration/queries/conftest.py`.
+**Resolved: operator creates `nokken_forecast_writer` role with
+INSERT, UPDATE, DELETE on `forecasts` + SELECT on read tables.**
+Lives only on production deploy units; local dev keeps using
+`nokken_ro` (the harness writes hindcasts only against the
+integration-test Postgres or against `nessie` post-deploy). PR 1
+takes the role name from `POSTGRES_WRITE_DSN` env var.
 
 ### H. CLAUDE.md edit at PR 1 — write-pool addition
 
-The current `db/postgres.py:1-62` is read-only-only. PR 1
-introduces a write-capable pool variant. The addition needs a
-matching note in `CLAUDE.md` Inspection-CLI section and Secret
-hygiene block — the read-only pool guarantee narrows from
-"the only pool" to "the only pool the inspect / query CLIs
-use". The forecast-job pool is governed separately.
-
-- **Proposal.** Land the CLAUDE.md edits in PR 1 alongside the
-  new pool. No new file; just a paragraph clarifying the two
-  pools' lanes.
+**Resolved: yes, fold into PR 1.** The current `db/postgres.py`
+read-only-only invariant narrows from "the only pool" to "the
+only pool the inspect / query CLIs use." A short paragraph in
+the Inspection-CLI section of `CLAUDE.md` clarifies the two
+pools' lanes. No new file; small inline edit.
 
 ---
 
 ## Decisions (final)
 
-*Empty until operator red-pen closes the §5 questions. Same
-convention as `scoping-genesis.md:27-72` and
-`forcing-requirements.md:28-76`.*
+*See the block at the top of this document.*
