@@ -93,31 +93,47 @@ Compact reference for downstream PR prompts. Each bullet closes one
 
 ### 1.2 Production data state (Faukstad, gauge id 12)
 
-Per the operator's status as of 2026-04-26 and
-`nokken-data/docs/operations/historical-backfill.md:10-16`:
+Per the operator's `nessie` inventory run on 2026-04-26 (queries in
+§1.3) and `nokken-data/docs/operations/historical-backfill.md:10-16`:
 
 - **`observations`** — recovery complete for all 65 active NVE
-  gauges. Faukstad is in that set; flow history extends back to
-  2003-01-31 (verified against `nessie` in PR #4 and re-cited at
-  `scoping-genesis.md:52`). 10-minute live ingestion runs against
-  `nessie` via the Phase-1 NVE flow scraper.
-- **`weather_observations`** — 18-month backfill window
-  2024-04-01 → 2025-10-01 currently in flight at ~1.5 s/hour
-  (`historical-backfill.md:11-12`); expected complete tonight. Five
-  variables per UTC hour (`forcing-requirements.md:82-86`),
-  `source = 'met_nordic_analysis_v4'`, `basin_version = 7` (the
-  current Faukstad polygon, 405.4 km²,
-  `historical-backfill.md:88-94`).
-- **`weather_forecasts`** — locationforecast 2.0 + MET Nordic
-  Forecast 1 km fetchers are merged in nokken-data and slated to
-  run live. Population state on `nessie` requires an inspect-CLI
-  query when next reachable.
+  gauges; per-gauge volumes typically 150k–800k rows per
+  `value_type` for hourly stations, with Lysakerelva an outlier at
+  ~1.24M rows on its 1-minute cadence. Most gauges show ~5–25%
+  gaps across the 26-year window vs. continuous-hourly expectation;
+  flow-vs-level row-count asymmetry per gauge is typically 1–5%.
+  Faukstad (gauge id 12): **180,129 flow rows + 188,997 level rows
+  spanning 2000-01-27 → 2026-04-26** — supersedes the
+  `scoping-genesis.md:52` 2003-01-31 floor citation. 10-minute live
+  ingestion runs against `nessie` via the Phase-1 NVE flow scraper.
+- **`weather_observations`** (Faukstad) — **41,030 rows = 8,221
+  UTC hours × 5 variables**, all five variables aligned at
+  identical hour counts (uniform coverage). Span at inventory time
+  was 2024-04-01 → 2025-03-09 12:00; the 18-month backfill to
+  2025-10-01 remains in flight at ~1.5 s/hour
+  (`historical-backfill.md:11-12`). `source =
+  'met_nordic_analysis_v4'`, `basin_version = 7` (current Faukstad
+  polygon, 405.4 km², `historical-backfill.md:88-94`).
+- **`weather_forecasts`** — **empty on `nessie` at inventory time.**
+  locationforecast 2.0 + MET Nordic Forecast 1 km fetchers are
+  merged in nokken-data; population begins as the live cycles start
+  writing.
+- **`forecasts`** — **empty.** Phase 3's scheduled forecast job
+  (PR 2) is the first writer.
 
 The Faukstad weather backfill **does not yet cover the agreed
 hindcast window** of 2012-09-01 → 2024-12-31 (Decisions block,
 `scoping-genesis.md:48-53`). Extending the backfill to MET Nordic
 v4's floor is operator work in `nokken-data` and runs in parallel —
 ~21 h wall-clock at 1.5 s/hour for the ~50,000 missing hours.
+
+**Faukstad observation gap rate.** 180,129 flow rows over the
+26-year span (~228,000 continuous hours expected) work out to
+~6,920 observed h/yr against an 8,760 h/yr ceiling — **~21%
+missing**. Baseline PRs (persistence, recession, lin reg, GBT)
+must tolerate missing-target hours in hindcast scoring: drop them
+from metric computation rather than impute, and report coverage
+alongside KGE / MAE / pinball.
 
 ### 1.3 Pre-merge inventory queries the operator runs against `nessie`
 
