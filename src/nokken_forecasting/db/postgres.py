@@ -13,10 +13,13 @@ paths raises a Postgres read-only-transaction error (SQLSTATE 25006)
 regardless of role privileges.
 
 The forecast-sink writer in ``nokken_forecasting.writers.forecasts``
-opts out per transaction by opening ``conn.transaction(readonly=False)``,
-which issues ``BEGIN READ WRITE`` and overrides the session default
-for that transaction only. The session default snaps back on the next
-transaction so adjacent reads on the same connection stay defended.
+opts out per transaction. asyncpg's ``Transaction`` only knows how
+to emit ``READ ONLY`` (never ``READ WRITE``), so the writer opens a
+plain ``conn.transaction()`` and immediately issues ``SET TRANSACTION
+READ WRITE`` as its first statement. That overrides the session
+default for the current transaction only; the next ``BEGIN`` on the
+same connection inherits ``default_transaction_read_only = on`` again,
+so adjacent reads stay defended.
 
 Single role per repo: this pool's DSN role gates writes via the
 operator's INSERT grant on ``forecasts``. The defense-in-depth

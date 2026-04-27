@@ -207,10 +207,14 @@ must not be softened.
 One pool, one DSN. The forecast-sink write path lands in Phase 3
 PR 1 on the **same pool** the readers use; the writer
 (`src/nokken_forecasting/writers/forecasts.py`) opts into a
-read-write transaction via `conn.transaction(readonly=False)`
-(`BEGIN READ WRITE`), which overrides the session-level read-only
-default for that transaction only. Adjacent reads on the same
-connection stay defended.
+read-write transaction by opening `conn.transaction()` and then
+issuing `SET TRANSACTION READ WRITE` as the first statement inside
+the block. asyncpg's `Transaction` builder only emits `READ ONLY`,
+never `READ WRITE`, so the explicit `SET TRANSACTION` is what
+actually overrides the session-level read-only default — and only
+for the current transaction. The next `BEGIN` on the same
+connection inherits the session default again, so adjacent reads
+stay defended.
 
 The operator's standing policy is one Postgres role per repo: this
 repo's `POSTGRES_DSN` role is `nokken_ro` locally and a single
