@@ -25,7 +25,10 @@ from tests.integration.queries.conftest import (  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
-async def _truncate_forecasts(_postgres_container: str) -> None:
+async def _truncate_forecasts(_postgres_container: str) -> None:  # noqa: F811
+    # `_postgres_container` is the imported fixture function above
+    # (kept around for pytest discovery); the parameter here is the
+    # resolved value pytest injects per request.
     conn = await asyncpg.connect(_postgres_container)
     try:
         await conn.execute("TRUNCATE forecasts")
