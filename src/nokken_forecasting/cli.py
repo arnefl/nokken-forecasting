@@ -7,16 +7,23 @@ Three sub-apps today:
 * ``query``    — typed-DataFrame readers backing the Phase 3
   baselines exposed for ad-hoc operator spot-checks (Phase 3b).
   Output mirrors ``inspect``'s aligned-text / ``--json`` shape.
-* ``forecast`` — run a baseline for a given gauge + issue time and
-  write the rows into ``forecasts`` (Phase 3 PR 1+). The scheduled
-  job that wraps this on a timer lands in PR 2.
+* ``forecast`` — run a baseline against ``forecasts``. Two flavours:
+
+  * ``forecast persistence`` — manual operator path against one
+    gauge + issue time. Useful for ad-hoc backfills and
+    incident-response replays.
+  * ``forecast run`` — the unattended path the systemd timer at
+    ``deploy/nokken-forecasting-forecast.timer`` invokes. Iterates
+    every gauge in ``jobs.forecast_job.FORECAST_GAUGES`` and writes
+    one tick's rows in a single connection. Idempotent on the
+    writer's deterministic uniqueness key.
 
 All three ride the single pool from
 ``nokken_forecasting.db.postgres.get_pool``. The pool sets
 ``default_transaction_read_only = on`` at session init so reads are
-defended in depth; ``forecast`` opts into a read-write transaction
-inside ``insert_forecasts`` (``BEGIN READ WRITE``) so its writes
-land while adjacent reads on the same connection stay defended.
+defended in depth; the ``forecast`` writers opt into a read-write
+transaction inside ``insert_forecasts`` so writes land while adjacent
+reads on the same connection stay defended.
 """
 
 from __future__ import annotations
@@ -38,6 +45,8 @@ from nokken_forecasting.baselines.persistence import (
 from nokken_forecasting.config import get_settings
 from nokken_forecasting.db import inspect as db_inspect
 from nokken_forecasting.db.postgres import close_pool
+from nokken_forecasting.jobs.forecast_job import run_forecast_job
+from nokken_forecasting.logging import configure_logging
 from nokken_forecasting.queries import (
     connect,
     get_gauges,
@@ -245,16 +254,46 @@ def _build_forecast_parser(sub: argparse._SubParsersAction) -> None:
         help=f"Forecast horizon in hours (default: {HORIZON_HOURS} = 7 days).",
     )
 
+    run = forecast_sub.add_parser(
+        "run",
+        help=(
+            "Unattended scheduled-job tick: persistence baseline "
+            "against every gauge in FORECAST_GAUGES."
+        ),
+    )
+    # `--issue-time` is optional and defaults to wall-clock now floored
+    # to top-of-hour inside the job module. The systemd timer fires at
+    # 00:00 UTC daily so the floor is a no-op for the production path;
+    # it matters for `Persistent=true` catch-up runs after a host
+    # outage and for ad-hoc operator invocations.
+    run.add_argument(
+        "--issue-time",
+        default=None,
+        help=(
+            "ISO-8601 UTC issue time. Naive inputs raise. "
+            "Default: current wall-clock UTC floored to the top of the hour."
+        ),
+    )
+    run.add_argument(
+        "--value-type",
+        choices=["flow", "level"],
+        default="flow",
+        help="Observation column to persist (default: flow).",
+    )
+    run.add_argument(
+        "--horizon-hours",
+        type=int,
+        default=HORIZON_HOURS,
+        help=f"Forecast horizon in hours (default: {HORIZON_HOURS} = 7 days).",
+    )
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.group not in {"inspect", "query", "forecast"}:
         parser.error(f"unknown group: {args.group}")
-    logging.basicConfig(
-        level=get_settings().log_level.upper(),
-        format='{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}',
-    )
+    configure_logging(get_settings().log_level)
     return asyncio.run(_run(args))
 
 
@@ -313,9 +352,15 @@ async def _dispatch_query(args: argparse.Namespace) -> int:
 
 
 async def _dispatch_forecast(args: argparse.Namespace) -> int:
-    if args.command != "persistence":
-        print(f"unknown command: {args.command}", file=sys.stderr)
-        return 2
+    if args.command == "persistence":
+        return await _dispatch_forecast_persistence(args)
+    if args.command == "run":
+        return await _dispatch_forecast_run(args)
+    print(f"unknown command: {args.command}", file=sys.stderr)
+    return 2
+
+
+async def _dispatch_forecast_persistence(args: argparse.Namespace) -> int:
     try:
         issue_time = (
             pd.Timestamp.now(tz="UTC")
@@ -355,18 +400,35 @@ async def _dispatch_forecast(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     _LOG.info(
-        "persistence forecast written: gauge_id=%s issue_time=%s "
-        "value_type=%s horizon_hours=%s rows=%s inserted=%s "
-        "model_run_at=%s",
-        args.gauge_id,
-        issue_time.isoformat(),
-        args.value_type,
-        args.horizon_hours,
-        len(rows),
-        inserted,
-        model_run_at.isoformat(),
+        "persistence forecast written",
+        extra={
+            "event": "forecast.persistence",
+            "gauge_id": args.gauge_id,
+            "issue_time": issue_time.isoformat(),
+            "value_type": args.value_type,
+            "horizon_hours": args.horizon_hours,
+            "rows": len(rows),
+            "inserted": inserted,
+            "model_run_at": model_run_at.isoformat(),
+        },
     )
     return 0
+
+
+async def _dispatch_forecast_run(args: argparse.Namespace) -> int:
+    try:
+        issue_time = (
+            None if args.issue_time is None else _parse_ts(args.issue_time)
+        )
+    except ValueError as exc:
+        print(f"error: invalid --issue-time: {exc}", file=sys.stderr)
+        return 2
+    summary = await run_forecast_job(
+        issue_time=issue_time,
+        value_type=args.value_type,
+        horizon_hours=args.horizon_hours,
+    )
+    return summary.exit_code
 
 
 async def _run_query_command(

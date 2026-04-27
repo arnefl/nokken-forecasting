@@ -1,0 +1,28 @@
+[Unit]
+Description=Daily tick for nokken-forecasting persistence forecast
+Documentation=https://github.com/arnefl/nokken-forecasting/blob/main/deploy/README.md
+
+[Timer]
+# Daily at 00:00 UTC. `OnCalendar=daily` is short for `*-*-* 00:00:00`
+# but defaults to system local time; spell out UTC explicitly so the
+# tick lands at the same wall-clock instant regardless of the host's
+# timezone. Cadence per docs/phase3-scoping.md §4.2 ("aligned to daily
+# cadence; operator can tighten to per-NWP-cycle later").
+OnCalendar=*-*-* 00:00:00 UTC
+
+# Catch up after the host (or the timer) was down: a missed tick fires
+# as soon as the timer comes back, then resumes the daily schedule.
+# The job's `--issue-time` defaults to wall-clock now floored to the
+# top of the hour, so a catch-up run lands at the catch-up hour, not at
+# the missed midnight — visible in the rows' `model_run_at` audit stamp.
+Persistent=true
+
+# Decouple from systemd's start-time fanout window. The forecast tick
+# is cheap (~1s wall) so deterministic alignment costs nothing, and a
+# fixed instant makes the "is the timer healthy?" eyeballing easier.
+AccuracySec=1m
+
+Unit=nokken-forecasting-forecast.service
+
+[Install]
+WantedBy=timers.target

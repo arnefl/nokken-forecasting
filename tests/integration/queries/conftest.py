@@ -140,6 +140,36 @@ async def seeded_conn(_postgres_container: str) -> AsyncIterator[asyncpg.Connect
         await conn.close()
 
 
+@pytest.fixture
+async def seeded_conn_readonly_default(
+    _postgres_container: str,
+) -> AsyncIterator[asyncpg.Connection]:
+    """Like ``seeded_conn`` but with the production session GUC applied.
+
+    Production connections come from the pool in
+    ``nokken_forecasting.db.postgres`` whose ``init`` callback sets
+    ``default_transaction_read_only = on`` per session. Tests that
+    exercise write paths through the pool's contract (job tick, future
+    hindcast harness) need that GUC mirrored on the seeded connection
+    so a writer regression — a refactor that lets the
+    ``SET TRANSACTION READ WRITE`` opt-out fall away — would surface
+    here as SQLSTATE 25006 rather than slipping through.
+
+    PR 1's ``test_writer_overrides_session_read_only_default`` calls
+    ``SET default_transaction_read_only = on`` inline rather than using
+    this fixture so the GUC application stays visible alongside the
+    contract assertion. New tests should prefer this fixture.
+    """
+    conn = await asyncpg.connect(_postgres_container)
+    try:
+        await _truncate_all(conn)
+        await _seed_fixture(conn)
+        await conn.execute("SET default_transaction_read_only = on")
+        yield conn
+    finally:
+        await conn.close()
+
+
 # ---------------- synthetic fixture ----------------
 #
 # One gauge (Faukstad, gauge_id=12), two sections referencing it,

@@ -242,13 +242,25 @@ output instead of the default aligned text:
   whose first non-comment token is not `SELECT` (case-insensitive).
 
 The `forecast` group runs a baseline and writes its rows into
-`forecasts` via the write-capable pool described above:
+`forecasts` on the same single pool described above (one Postgres
+role per repo; `INSERT` on `forecasts` granted on prod):
 
 - `nokken-forecasting forecast persistence --gauge-id <id>
-  --issue-time <iso> [--value-type flow|level] [--horizon-hours N]`
-  — last observation held flat for `--horizon-hours` (default 168 =
-  7 days), `model_version = 'persistence_v1'`, `model_run_at`
-  stamped at write time. Requires `POSTGRES_WRITE_DSN` to be set.
+  [--issue-time <iso>] [--value-type flow|level] [--horizon-hours N]`
+  — manual operator path. Last observation held flat for
+  `--horizon-hours` (default 168 = 7 days), `model_version =
+  'persistence_v1'`, `model_run_at` stamped at write time.
+  `--issue-time` defaults to current wall-clock UTC.
+- `nokken-forecasting forecast run [--issue-time <iso>]
+  [--value-type flow|level] [--horizon-hours N]`
+  — unattended scheduled-job path. Iterates every gauge in
+  `jobs.forecast_job.FORECAST_GAUGES` (today: just Faukstad,
+  `gauge_id = 12`) and writes one tick's rows. Default
+  `--issue-time` is now floored to top-of-hour so reruns within an
+  hour are no-ops on the writer's deterministic uniqueness key.
+  This is the entry point the systemd timer at
+  `deploy/nokken-forecasting-forecast.timer` invokes; the operator
+  runbook lives at `deploy/README.md`.
 
 Examples:
 
