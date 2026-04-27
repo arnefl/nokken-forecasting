@@ -459,26 +459,70 @@ baseline through the harness in `nokken_forecasting.hindcast`. Every
 row from one invocation shares one `model_run_at`; rerunning over the
 same window is a no-op on the writer's uniqueness key.
 
-The reference invocation — persistence baseline over the agreed test
-window, weekly cadence (~261 issue-times × 168 h ≈ 43,800 rows):
+**The hindcast window splits.** A pre-merge density spot-check on
+Faukstad's `observations` for 2020-01-01 → 2024-12-31 found three
+regimes, only two of which support recession fitting at hourly
+cadence:
+
+- **2020-01 → 2021-04** — clean hourly flow + level (~700 rows / month
+  each). Fittable.
+- **2021-05 → 2021-09** — total outage (no rows). Skip.
+- **2021-10 → 2022-02** — recovery (2021-10 partial from the 8th)
+  followed by 4 clean months. Fittable.
+- **2022-03 → 2024-07** — **flow channel dead at the NVE upstream
+  source** (0–30 rows / month for ~28 months); level continues
+  hourly. Confirmed at sildre.nve.no — not an ingestion regression.
+  Not fittable for recession.
+- **2024-08 → 2024-12** — clean hourly flow + level. Fittable.
+
+Only ~21 of 60 months carry hourly flow. A weekly hindcast straddling
+the dead window would error or produce unfittable segments on most
+issue-times, so the runbook splits into two windows that skip the
+gap. Operators running hindcasts over a window that includes
+2022-03 → 2024-07 should expect most issue-times to fail
+recession-fit.
+
+The reference invocation is a pair of runs per baseline. Persistence
+window A (clean pre-outage):
 
 ```
 cd /srv/nokken-forecasting
 set -a; . /srv/nokken-forecasting/.env; set +a
 uv run nokken-forecasting hindcast run \
     --baseline persistence --gauge-id 12 \
-    --start 2020-01-01T00:00:00Z --end 2024-12-31T00:00:00Z \
+    --start 2020-01-01T00:00:00Z --end 2021-04-30T00:00:00Z \
     --cadence weekly
 ```
 
-Recession at the same window:
+Persistence window B (clean post-recovery):
+
+```
+uv run nokken-forecasting hindcast run \
+    --baseline persistence --gauge-id 12 \
+    --start 2024-08-01T00:00:00Z --end 2024-12-31T00:00:00Z \
+    --cadence weekly
+```
+
+Recession at the same two windows:
 
 ```
 uv run nokken-forecasting hindcast run \
     --baseline recession --gauge-id 12 \
-    --start 2020-01-01T00:00:00Z --end 2024-12-31T00:00:00Z \
+    --start 2020-01-01T00:00:00Z --end 2021-04-30T00:00:00Z \
+    --cadence weekly
+uv run nokken-forecasting hindcast run \
+    --baseline recession --gauge-id 12 \
+    --start 2024-08-01T00:00:00Z --end 2024-12-31T00:00:00Z \
     --cadence weekly
 ```
+
+Total ~91 issue-times per baseline (~70 from window A + ~21 from
+window B). The operator runs each invocation separately, so each gets
+its own `model_run_at` stamp — each baseline ends up with **two**
+`model_run_at` values in `forecasts`. That is the correct shape: the
+harness contract is "one `model_run_at` per CLI invocation," not
+"one per baseline." PR 6's comparison report aggregates across
+`(model_version, model_run_at)` pairs accordingly.
 
 Hourly / daily cadences are available for tighter windows (e.g.
 post-incident replay over a one-week window) — pick the lightest
@@ -498,24 +542,31 @@ not abort the run.
 
 ### Verify the rows landed
 
-`model_run_at` is the discriminator. Replace the literal below with
-the timestamp from the `hindcast.start` log line of the run you want
-to inspect:
+`model_run_at` is the discriminator. Each split-window invocation
+above produces its own stamp, so the verification SQL groups by
+both `model_version` and `model_run_at`. Replace the literal below
+with a timestamp at-or-before the first invocation in the batch
+(e.g. the `hindcast.start` log line of the persistence-A run):
 
 ```
 uv run nokken-forecasting inspect query \
-    "SELECT model_version, COUNT(DISTINCT issue_time) AS issue_times, \
+    "SELECT model_version, model_run_at, \
+            COUNT(DISTINCT issue_time) AS issue_times, \
             COUNT(*) AS rows, \
-            MIN(issue_time) AS first_issue, MAX(issue_time) AS last_issue \
+            MIN(issue_time) AS first_issue, \
+            MAX(issue_time) AS last_issue \
      FROM forecasts \
      WHERE gauge_id = 12 \
-       AND model_run_at = '<run_at-iso>' \
-     GROUP BY model_version"
+       AND model_run_at >= '<run_start_timestamp>' \
+     GROUP BY model_version, model_run_at \
+     ORDER BY model_run_at"
 ```
 
-Healthy: one row per `model_version`, `rows = issue_times * 168`,
-`first_issue` and `last_issue` matching the `--start` / `--end` you
-passed.
+Healthy: **two rows per `model_version`** (one per window's
+invocation), `rows = issue_times * 168`, `first_issue` and
+`last_issue` matching the `--start` / `--end` you passed for that
+window. Window A typically yields ~70 issue-times; window B
+typically yields ~21.
 
 ### Distinguish hindcast rows from live rows
 

@@ -61,6 +61,18 @@ persistence. Surfaces the choice up to the caller; downstream
 hindcasts log the failure per issue-time and continue. The user's
 PR 3 prompt makes this an explicit choice over a silent
 persistence fallback.
+
+Known Faukstad data gap (2022-03 → 2024-07)
+===========================================
+A pre-merge density spot-check on Faukstad's `observations` series
+revealed a **flow-channel outage at the NVE upstream source from
+2022-03 through 2024-07** (~28 months); level continues hourly
+through that window. The gap is visible at sildre.nve.no — not an
+ingestion regression. Hindcasts over windows that include this
+period will fail recession-fit on most issue-times and operators
+should split the window around the gap. The runbook in
+``deploy/README.md`` §9 documents the standing split (window A:
+2020-01 → 2021-04; window B: 2024-08 → 2024-12).
 """
 
 from __future__ import annotations
