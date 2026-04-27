@@ -207,3 +207,58 @@ class TestInsertForecasts:
             FIXTURE_GAUGE_ID,
         )
         assert stored == run_at_utc
+
+    async def test_writer_overrides_session_read_only_default(
+        self, seeded_conn: asyncpg.Connection
+    ) -> None:
+        # Regression: the writer must succeed even when the connection's
+        # session has `default_transaction_read_only = on` (which the
+        # pool's `_init_readonly` callback applies in production).
+        # asyncpg's `Transaction` builder only emits `READ ONLY`, never
+        # `READ WRITE` — so a writer that opens
+        # `conn.transaction(readonly=False)` and trusts it to issue
+        # `BEGIN READ WRITE` actually issues plain `BEGIN`, inherits the
+        # session default, and INSERT raises SQLSTATE 25006. The
+        # `seeded_conn` fixture is a raw `asyncpg.connect` and does NOT
+        # carry that session default, so the other tests in this module
+        # cannot catch the regression — this one sets the GUC explicitly
+        # to mirror the production pool init.
+        await seeded_conn.execute("SET default_transaction_read_only = on")
+        assert (
+            await seeded_conn.fetchval("SHOW default_transaction_read_only")
+            == "on"
+        )
+
+        issue = pd.Timestamp("2026-04-27T12:00:00", tz="UTC")
+        valid = issue + pd.Timedelta(hours=1)
+        run_at = datetime(2026, 4, 27, 12, 0, 30, tzinfo=UTC)
+        inserted = await insert_forecasts(
+            seeded_conn,
+            [_row(issue_time=issue, valid_time=valid, value=42.5)],
+            model_run_at=run_at,
+        )
+        assert inserted == 1
+
+        # Snap-back: the next BEGIN on the same connection inherits the
+        # session-level read-only default again. The writer's
+        # `SET TRANSACTION READ WRITE` is scoped to its transaction
+        # only, so a follow-up write attempt outside the writer's
+        # block must fail with SQLSTATE 25006 — defending adjacent
+        # reads on the same connection.
+        with pytest.raises(asyncpg.exceptions.ReadOnlySQLTransactionError):
+            async with seeded_conn.transaction():
+                await seeded_conn.execute(
+                    "INSERT INTO forecasts "
+                    "(issue_time, valid_time, gauge_id, value_type, "
+                    "quantile, value, model_version, model_run_at) "
+                    "VALUES ($1, $2, $3, $4, NULL, $5, $6, $7)",
+                    valid.tz_convert("UTC").to_pydatetime().replace(tzinfo=None)
+                    + timedelta(hours=1),
+                    valid.tz_convert("UTC").to_pydatetime().replace(tzinfo=None)
+                    + timedelta(hours=2),
+                    FIXTURE_GAUGE_ID,
+                    "flow",
+                    99.0,
+                    MODEL_VERSION,
+                    run_at,
+                )

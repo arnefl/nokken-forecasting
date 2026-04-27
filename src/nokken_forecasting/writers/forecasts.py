@@ -79,12 +79,16 @@ async def insert_forecasts(
     historical. ``model_run_at`` must be tz-aware (any UTC offset is
     accepted and converted to UTC); naive datetimes raise.
 
-    The whole batch lands inside a single read-write transaction
-    (``conn.transaction(readonly=False)`` overrides the session-level
-    ``default_transaction_read_only = on`` default for this transaction
-    only — adjacent reads on the same connection stay defended).
-    Conflicting rows (same model_version at the same (issue, valid,
-    gauge, value_type)) are skipped via ``ON CONFLICT DO NOTHING``.
+    The whole batch lands inside a single read-write transaction.
+    asyncpg's ``Transaction`` builder only knows how to emit ``READ
+    ONLY`` (never ``READ WRITE``), so to opt out of the session-level
+    ``default_transaction_read_only = on`` default the writer issues
+    ``SET TRANSACTION READ WRITE`` as the first statement inside the
+    transaction block. That applies to the current transaction only;
+    the session default snaps back on the next ``BEGIN``, so adjacent
+    reads on the same connection stay defended. Conflicting rows
+    (same model_version at the same (issue, valid, gauge, value_type))
+    are skipped via ``ON CONFLICT DO NOTHING``.
 
     All rows must carry ``quantile=None`` — this writer covers the
     deterministic lane only.
@@ -97,7 +101,12 @@ async def insert_forecasts(
         )
     model_run_at_utc = model_run_at.astimezone(UTC)
     inserted = 0
-    async with conn.transaction(readonly=False):
+    async with conn.transaction():
+        # asyncpg's Transaction only emits READ ONLY, never READ WRITE,
+        # so we override the session-level read-only default explicitly
+        # for this transaction. Must be the first statement in the
+        # block, before any SELECT/INSERT. See module docstring.
+        await conn.execute("SET TRANSACTION READ WRITE")
         for row in rows:
             if row.quantile is not None:
                 raise ValueError(
