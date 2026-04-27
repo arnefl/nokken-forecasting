@@ -20,7 +20,7 @@ and the hindcast harness without branching.
 
 Recession-segment definition
 ============================
-The fit uses **strictly monotonically-decreasing runs** of consecutive
+The fit uses **near-monotonically-decreasing runs** of consecutive
 observations whose total span is at least ``MIN_RECESSION_RUN_HOURS``
 (24 h). A "consecutive" pair is one whose timestamps lie within
 ``MAX_INTRA_SEGMENT_GAP_HOURS`` (2 h) — long gaps between rows
@@ -28,6 +28,16 @@ observations whose total span is at least ``MIN_RECESSION_RUN_HOURS``
 ``docs/phase3-scoping.md`` §1.2) terminate a candidate segment so the
 fit never crosses an outage boundary even when the values around the
 gap happen to be decreasing.
+
+A pair is "in-segment" on the value axis when ``Q[i+1] <= Q[i] *
+(1 + UPTICK_TOLERANCE)`` — a small upward step (default 1%) is
+permitted. Faukstad's hourly observations carry ±~1% sub-hourly
+noise that breaks pairwise strict-monotone descent while preserving
+log-linear decay over multi-day segments. The 1% tolerance admits
+real recessions while still rejecting noise-dominated or rising
+series; this is the relaxation introduced in PR 3.6 after PR 3.5's
+diagnostic showed strict-monotone was the binding rejection cause on
+every Faukstad Window A issue-time.
 
 The 2 h gap threshold matches the hourly + occasional-two-hourly
 cadence that dominates Faukstad's observation series (~99% of
@@ -99,20 +109,34 @@ MIN_RECESSION_RUN_HOURS = 24
 # linear-reservoir approximation degrades.
 MAX_INTRA_SEGMENT_GAP_HOURS = 2
 
+# Relaxation of pairwise monotone-descent: a pair is "in-segment" on the
+# value axis when Q[i+1] <= Q[i] * (1 + UPTICK_TOLERANCE). Faukstad's
+# hourly flow carries ±~1% sub-hourly noise that breaks strict descent
+# while preserving log-linear decay over multi-day segments — see PR 3.5
+# diagnostic outputs in PR #18 description. 1% admits the noise without
+# inverting the rule's direction (an ascending series with steps > 1%
+# is still rejected) or letting noise-dominated series through (the
+# OLS-through-origin fit's slope >= 0 check below catches those).
+UPTICK_TOLERANCE = 0.01
+
 
 def _identify_recession_segments(
     series: pd.DataFrame,
     *,
     min_run_hours: int = MIN_RECESSION_RUN_HOURS,
     max_gap_hours: float = MAX_INTRA_SEGMENT_GAP_HOURS,
+    uptick_tolerance: float = UPTICK_TOLERANCE,
 ) -> list[pd.DataFrame]:
-    """Return monotonically-decreasing segments of length >= ``min_run_hours``.
+    """Return near-monotonically-decreasing segments of length >= ``min_run_hours``.
 
     ``series`` must be sorted ascending by ``time``. Each returned
     DataFrame is a contiguous slice of ``series`` representing one
     recession segment; the returned list is non-empty only when at
     least one segment satisfies both the length floor and the gap
-    floor.
+    floor. Pairs are "in-segment" on the value axis when
+    ``Q[i+1] <= Q[i] * (1 + uptick_tolerance)`` — a small upward step
+    is admitted to absorb sub-hourly observation noise without
+    inverting the rule's direction.
     """
     if len(series) < 2:
         return []
@@ -125,8 +149,9 @@ def _identify_recession_segments(
     times = series["time"].dt.tz_localize(None).to_numpy()
     values = series["value"].to_numpy(dtype=np.float64)
     time_diffs_h = np.diff(times) / np.timedelta64(1, "h")
-    value_diffs = np.diff(values)
-    in_segment = (value_diffs < 0) & (time_diffs_h <= max_gap_hours)
+    in_segment = (values[1:] <= values[:-1] * (1 + uptick_tolerance)) & (
+        time_diffs_h <= max_gap_hours
+    )
 
     segments: list[pd.DataFrame] = []
     i = 0

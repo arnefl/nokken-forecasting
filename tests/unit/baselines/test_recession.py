@@ -19,6 +19,7 @@ from nokken_forecasting.baselines.recession import (
     MAX_INTRA_SEGMENT_GAP_HOURS,
     MIN_RECESSION_RUN_HOURS,
     MODEL_VERSION,
+    UPTICK_TOLERANCE,
     recession_forecast,
 )
 
@@ -272,5 +273,89 @@ class TestRecessionForecast:
         # the segment-floor or the gap-threshold trips a unit test.
         assert MIN_RECESSION_RUN_HOURS == 24
         assert MAX_INTRA_SEGMENT_GAP_HOURS == 2
+        assert UPTICK_TOLERANCE == 0.01
         assert MODEL_VERSION == "recession_v1"
         assert HORIZON_HOURS == 168
+
+
+class TestUptickTolerance:
+    """PR 3.6 — pairwise monotone-descent relaxed to a 1% tolerance."""
+
+    def _noisy_decay(
+        self, *, issue: pd.Timestamp, q0: float, k_true: float,
+        history_hours: int, noise: float, seed: int,
+    ) -> pd.DataFrame:
+        rng = np.random.default_rng(seed=seed)
+        rows = [
+            (
+                issue - pd.Timedelta(hours=history_hours - 1 - h),
+                "flow",
+                float(q0 * math.exp(-k_true * h) * (1.0 + rng.uniform(-noise, noise))),
+            )
+            for h in range(history_hours)
+        ]
+        return _obs_frame(rows)
+
+    def test_clean_decay_still_fits(self) -> None:
+        # Sanity: tolerance relaxation doesn't break the noise-free path.
+        issue = pd.Timestamp("2026-04-27T12:00:00", tz="UTC")
+        obs = _synthetic_recession(
+            issue_time=issue, q0=100.0, k_true=0.01, history_hours=30
+        )
+        rows = recession_forecast(obs, gauge_id=12, issue_time=issue)
+        assert len(rows) == HORIZON_HOURS
+        seed = float(obs.iloc[-1]["value"])
+        assert rows[0].value == pytest.approx(seed * math.exp(-0.01), rel=1e-3)
+
+    def test_one_percent_noise_fits(self) -> None:
+        # 30 h decay with i.i.d. ±1% multiplicative noise. Strict-monotone
+        # would reject; the tolerance admits it. Recovered k is close to
+        # the true rate (loose bound — noise corrupts the fit somewhat).
+        issue = pd.Timestamp("2026-04-27T12:00:00", tz="UTC")
+        obs = self._noisy_decay(
+            issue=issue, q0=100.0, k_true=0.02, history_hours=30,
+            noise=0.01, seed=7,
+        )
+        rows = recession_forecast(obs, gauge_id=12, issue_time=issue)
+        assert len(rows) == HORIZON_HOURS
+        # Values are strictly decreasing (k > 0 was recovered).
+        values = [r.value for r in rows]
+        assert all(values[i + 1] < values[i] for i in range(len(values) - 1))
+
+    def test_five_percent_noise_rejected(self) -> None:
+        # ±5% multiplicative noise produces upticks well outside the 1%
+        # tolerance — the segment detector chops it into many short runs,
+        # each below the 24h floor, so the baseline raises.
+        issue = pd.Timestamp("2026-04-27T12:00:00", tz="UTC")
+        obs = self._noisy_decay(
+            issue=issue, q0=100.0, k_true=0.02, history_hours=30,
+            noise=0.05, seed=7,
+        )
+        with pytest.raises(ValueError, match="recession segments|non-decay"):
+            recession_forecast(obs, gauge_id=12, issue_time=issue)
+
+    def test_monotone_ascent_within_tolerance_rejected(self) -> None:
+        # Q[i+1] = Q[i] * 1.01 — every pair sits exactly at the upper edge
+        # of the tolerance, so the relaxed in-segment mask admits the run.
+        # The slope >= 0 check in _fit_decay_constant must catch it: the
+        # tolerance must not invert the rule's direction.
+        issue = pd.Timestamp("2026-04-27T12:00:00", tz="UTC")
+        rows: list[tuple[pd.Timestamp, str, float]] = []
+        q = 10.0
+        for h in range(30):
+            rows.append((issue - pd.Timedelta(hours=29 - h), "flow", q))
+            q *= 1.0 + UPTICK_TOLERANCE
+        obs = _obs_frame(rows)
+        with pytest.raises(ValueError, match="non-decay|recession segments"):
+            recession_forecast(obs, gauge_id=12, issue_time=issue)
+
+    def test_short_clean_fragment_still_rejected_by_length(self) -> None:
+        # 8 hours of clean exponential decay is unambiguously a recession
+        # but sits below the 24h length floor — relaxation must not lower
+        # the floor. Sanity-check that length is still binding.
+        issue = pd.Timestamp("2026-04-27T12:00:00", tz="UTC")
+        obs = _synthetic_recession(
+            issue_time=issue, q0=100.0, k_true=0.01, history_hours=8
+        )
+        with pytest.raises(ValueError, match="recession segments"):
+            recession_forecast(obs, gauge_id=12, issue_time=issue)
