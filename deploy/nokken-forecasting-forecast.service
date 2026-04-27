@@ -1,0 +1,37 @@
+[Unit]
+Description=nokken-forecasting daily persistence forecast (one-shot)
+Documentation=https://github.com/arnefl/nokken-forecasting/blob/main/deploy/README.md
+# network-online ensures the shared Postgres host is reachable before
+# the tick fires. postgresql.service is a no-op on hosts where Postgres
+# runs elsewhere; harmless to list, useful when colocated with `nessie`.
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+# Type=oneshot: this unit runs the forecast once and exits. The timer
+# (deploy/nokken-forecasting-forecast.timer) decides when. No Restart=
+# on a oneshot — failures surface via the next timer tick + journald.
+Type=oneshot
+
+# Deploy root mirrors nokken-data's `/srv/<repo>` convention. The
+# operator places `.env` (chmod 600) here at install time.
+WorkingDirectory=/srv/nokken-forecasting
+EnvironmentFile=/srv/nokken-forecasting/.env
+
+# `uv run` resolves the pinned interpreter + dependencies from the
+# committed `uv.lock`. Path here assumes the standard uv install at
+# /usr/local/bin/uv. Operator-verify against your install per the
+# runbook in deploy/README.md.
+ExecStart=/usr/local/bin/uv run nokken-forecasting forecast run
+
+# stdout + stderr → journald. `journalctl -t nokken-forecasting -f`
+# tails the JSON-line output the runbook documents.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nokken-forecasting
+
+# Dedicated unprivileged service user (matches the chmod-600 `.env`
+# posture and nokken-data's `nokken` user). Create the user before
+# enabling the timer — the runbook walks through `useradd …`.
+User=nokken
+Group=nokken

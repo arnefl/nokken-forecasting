@@ -66,6 +66,33 @@ class TestParser:
         assert args.value_type == "level"
         assert args.horizon_hours == 24
 
+    def test_forecast_run_no_args_uses_defaults(self) -> None:
+        # `forecast run` is the unattended entry point — no required
+        # args. `--issue-time` defaults to None and the job module
+        # substitutes wall-clock now floored to top-of-hour.
+        parser = cli._build_parser()
+        args = parser.parse_args(["forecast", "run"])
+        assert args.group == "forecast"
+        assert args.command == "run"
+        assert args.issue_time is None
+        assert args.value_type == "flow"
+        assert args.horizon_hours == 168
+
+    def test_forecast_run_with_explicit_issue_time(self) -> None:
+        parser = cli._build_parser()
+        args = parser.parse_args(
+            [
+                "forecast",
+                "run",
+                "--issue-time",
+                "2026-04-27T00:00:00Z",
+                "--horizon-hours",
+                "24",
+            ]
+        )
+        assert args.issue_time == "2026-04-27T00:00:00Z"
+        assert args.horizon_hours == 24
+
     def test_inspect_and_query_groups_still_parse(self) -> None:
         # Existing groups must not regress — the new `forecast`
         # subparser sits alongside, not on top of them.
