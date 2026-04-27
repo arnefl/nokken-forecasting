@@ -221,8 +221,8 @@ repo's `POSTGRES_DSN` role is `nokken_ro` locally and a single
 production role with `INSERT` on `forecasts` granted on prod. There
 is no separate writer DSN and no separate writer role. The
 `inspect` and `query` subcommands inherit the session-level
-read-only invariant unchanged; only the `forecast` group's writer
-opens a read-write transaction.
+read-only invariant unchanged; the `forecast` and `hindcast` groups'
+writer opens a read-write transaction.
 
 Subcommands — run any of them with `--json` to emit machine-readable
 output instead of the default aligned text:
@@ -262,6 +262,29 @@ role per repo; `INSERT` on `forecasts` granted on prod):
   `deploy/nokken-forecasting-forecast.timer` invokes; the operator
   runbook lives at `deploy/README.md`.
 
+The `hindcast` group replays a baseline at historical issue-times so
+PR 6's comparison report has rows to score. Hindcast rows land in the
+same `forecasts` table as live forecasts, distinguished by
+`model_run_at ≫ issue_time` (live: `model_run_at ≈ issue_time`); per
+`docs/phase3-scoping.md` Decisions (final). Every row written by one
+invocation shares one `model_run_at` stamp — the contract PR 6's
+comparison report relies on to filter rows to a hindcast run.
+
+- `nokken-forecasting hindcast run --baseline {persistence|recession}
+  --gauge-id <id> --start <iso> --end <iso>
+  [--cadence hourly|daily|weekly] [--value-type flow|level]
+  [--horizon-hours N]`
+  — manual operator path. Builds an inclusive issue-time list from
+  `--start`/`--end`/`--cadence` (default weekly) and dispatches the
+  named baseline through `nokken_forecasting.hindcast.run_hindcast`.
+  Single-gauge by design; multi-gauge backfills run as repeat
+  invocations from the runbook. Idempotent on the writer's
+  deterministic uniqueness key — rerunning the same window writes
+  zero new rows. Per-issue-time errors are logged
+  (`event=hindcast.issue_time status=error`) and do not abort the
+  run; the invocation exits non-zero only when **every**
+  issue-time errored.
+
 Examples:
 
 ```
@@ -273,6 +296,10 @@ uv run nokken-forecasting inspect sample observations --limit 3 \
 uv run nokken-forecasting inspect query \
     "SELECT value_type, MIN(time), MAX(time), COUNT(*) \
      FROM observations WHERE gauge_id = 12 GROUP BY value_type"
+uv run nokken-forecasting hindcast run \
+    --baseline persistence --gauge-id 12 \
+    --start 2020-01-01T00:00:00Z --end 2024-12-31T00:00:00Z \
+    --cadence weekly
 ```
 
 Dogfood the CLI rather than dropping into `psql` for one-off reads,
