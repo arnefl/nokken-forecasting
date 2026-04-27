@@ -11,6 +11,12 @@ an APScheduler-in-service like nokken-data uses. See "Why systemd
 timer here, APScheduler in nokken-data?" at the bottom for the
 rationale; the asymmetry is intentional.
 
+§§ 1–8 cover the **live** forecast pipeline — the daily tick the
+systemd timer drives. § 9 covers the **hindcast** workflow — the
+operator-driven replay path that lands historical-issue-time rows
+into the same `forecasts` sink. Hindcasts are not scheduled; they
+run on demand from the operator's shell.
+
 ## Prerequisites
 
 - Same Ubuntu VM that runs `nokken-data-scheduler`. Network reachability
@@ -417,6 +423,185 @@ Re-run the Prerequisites install one-liner to fix.)
 | `gauge_id … violates foreign key constraint` | `FORECAST_GAUGES` lists a `gauge_id` not present in `gauges`. | Reconcile against `nokken-forecasting query gauges`. |
 | Timer fires but the unit exits non-zero | Per-gauge errors logged as `event=forecast_job.gauge status=error`; if every gauge errored the job exits 1. | Grep the per-gauge log lines for `error` field; fix and either wait for the next tick or `systemctl start` the unit manually to retry. |
 | Catch-up tick after host downtime writes "wrong" `issue_time` | `Persistent=true` fires the missed tick as soon as the timer is back. The job's `issue_time` defaults to wall-clock now floored to the hour, so the catch-up rows reflect the catch-up hour, not the missed midnight. | Working as intended — the audit trail (`model_run_at` stamp) makes the gap visible. To fill the gap deliberately, replay manually with `nokken-forecasting forecast run --issue-time <iso>`. |
+
+## 9. Hindcasts
+
+The scheduled timer covers **live** forecasts only — the `forecast run`
+entrypoint above. **Hindcasts** (replays at historical issue-times,
+producing rows PR 6's comparison report scores against) are an
+operator-driven manual workflow. They share the same `forecasts` sink
+and the same Postgres role; they're distinguished from live rows by
+`model_run_at ≫ issue_time` (live: `model_run_at ≈ issue_time`). Per
+`docs/phase3-scoping.md` Decisions (final).
+
+### When to run a hindcast
+
+- After PR 3 lands, to backfill `persistence_v1` reference rows over
+  the test window (2020-01-01 → 2024-12-31). PR 3's test plan lists
+  the exact invocation; this is also the smoke-test that the harness
+  end-to-end works against `nessie`.
+- After a new baseline lands (PR 4 = `linear_v1`, PR 5 = `lgb_v1`),
+  to populate hindcast rows over the same test window so PR 6's
+  comparison report has scores per baseline.
+- After a baseline's `model_version` is bumped (e.g. retrained
+  artefact), to re-score the new version against the same window.
+  The deterministic uniqueness key is
+  `(issue_time, valid_time, gauge_id, value_type, model_version)` —
+  bump the version (`persistence_v1` → `persistence_v1_<date>` if
+  needed) so the new rows coexist with the prior run rather than
+  conflicting.
+
+### Run a hindcast
+
+`nokken-forecasting hindcast run` builds an inclusive issue-time list
+from `--start` / `--end` / `--cadence` and dispatches the named
+baseline through the harness in `nokken_forecasting.hindcast`. Every
+row from one invocation shares one `model_run_at`; rerunning over the
+same window is a no-op on the writer's uniqueness key.
+
+**The hindcast window splits.** A pre-merge density spot-check on
+Faukstad's `observations` for 2020-01-01 → 2024-12-31 found three
+regimes, only two of which support recession fitting at hourly
+cadence:
+
+- **2020-01 → 2021-04** — clean hourly flow + level (~700 rows / month
+  each). Fittable.
+- **2021-05 → 2021-09** — total outage (no rows). Skip.
+- **2021-10 → 2022-02** — recovery (2021-10 partial from the 8th)
+  followed by 4 clean months. Fittable.
+- **2022-03 → 2024-07** — **flow channel dead at the NVE upstream
+  source** (0–30 rows / month for ~28 months); level continues
+  hourly. Confirmed at sildre.nve.no — not an ingestion regression.
+  Not fittable for recession.
+- **2024-08 → 2024-12** — clean hourly flow + level. Fittable.
+
+Only ~21 of 60 months carry hourly flow. A weekly hindcast straddling
+the dead window would error or produce unfittable segments on most
+issue-times, so the runbook splits into two windows that skip the
+gap. Operators running hindcasts over a window that includes
+2022-03 → 2024-07 should expect most issue-times to fail
+recession-fit.
+
+The reference invocation is a pair of runs per baseline. Persistence
+window A (clean pre-outage):
+
+```
+cd /srv/nokken-forecasting
+set -a; . /srv/nokken-forecasting/.env; set +a
+uv run nokken-forecasting hindcast run \
+    --baseline persistence --gauge-id 12 \
+    --start 2020-01-01T00:00:00Z --end 2021-04-30T00:00:00Z \
+    --cadence weekly
+```
+
+Persistence window B (clean post-recovery):
+
+```
+uv run nokken-forecasting hindcast run \
+    --baseline persistence --gauge-id 12 \
+    --start 2024-08-01T00:00:00Z --end 2024-12-31T00:00:00Z \
+    --cadence weekly
+```
+
+Recession at the same two windows:
+
+```
+uv run nokken-forecasting hindcast run \
+    --baseline recession --gauge-id 12 \
+    --start 2020-01-01T00:00:00Z --end 2021-04-30T00:00:00Z \
+    --cadence weekly
+uv run nokken-forecasting hindcast run \
+    --baseline recession --gauge-id 12 \
+    --start 2024-08-01T00:00:00Z --end 2024-12-31T00:00:00Z \
+    --cadence weekly
+```
+
+Total ~91 issue-times per baseline (~70 from window A + ~21 from
+window B). The operator runs each invocation separately, so each gets
+its own `model_run_at` stamp — each baseline ends up with **two**
+`model_run_at` values in `forecasts`. That is the correct shape: the
+harness contract is "one `model_run_at` per CLI invocation," not
+"one per baseline." PR 6's comparison report aggregates across
+`(model_version, model_run_at)` pairs accordingly.
+
+Hourly / daily cadences are available for tighter windows (e.g.
+post-incident replay over a one-week window) — pick the lightest
+cadence that fills the test set. Weekly is the standing default.
+
+### What success looks like
+
+A healthy run starts with one `event=hindcast.start` line listing
+`baseline`, `gauge_id`, `cadence`, `start`, `end`, `issue_times` count
+and `model_run_at`; emits one `event=hindcast.issue_time
+status=success` line per issue-time with `rows_inserted` set; and
+ends with `event=hindcast.done` carrying `succeeded` / `failed` /
+`rows_attempted` / `rows_inserted` / `model_run_at`. Per-issue-time
+errors land as `status=error` in the per-line stream — a single bad
+issue-time (e.g. a gauge outage covering the lookback window) does
+not abort the run.
+
+### Verify the rows landed
+
+`model_run_at` is the discriminator. Each split-window invocation
+above produces its own stamp, so the verification SQL groups by
+both `model_version` and `model_run_at`. Replace the literal below
+with a timestamp at-or-before the first invocation in the batch
+(e.g. the `hindcast.start` log line of the persistence-A run):
+
+```
+uv run nokken-forecasting inspect query \
+    "SELECT model_version, model_run_at, \
+            COUNT(DISTINCT issue_time) AS issue_times, \
+            COUNT(*) AS rows, \
+            MIN(issue_time) AS first_issue, \
+            MAX(issue_time) AS last_issue \
+     FROM forecasts \
+     WHERE gauge_id = 12 \
+       AND model_run_at >= '<run_start_timestamp>' \
+     GROUP BY model_version, model_run_at \
+     ORDER BY model_run_at"
+```
+
+Healthy: **two rows per `model_version`** (one per window's
+invocation), `rows = issue_times * 168`, `first_issue` and
+`last_issue` matching the `--start` / `--end` you passed for that
+window. Window A typically yields ~70 issue-times; window B
+typically yields ~21.
+
+### Distinguish hindcast rows from live rows
+
+The two share the table; the live cron writes one tick a day with
+`model_run_at ≈ issue_time + minutes`, hindcasts write a whole
+window's worth at one wall-clock instant. Either filter:
+
+```
+-- Live rows only (model_run_at within 1 hour of issue_time):
+SELECT * FROM forecasts
+WHERE ABS(EXTRACT(EPOCH FROM (model_run_at - issue_time))) < 3600;
+
+-- Hindcast rows only (model_run_at much later than issue_time):
+SELECT * FROM forecasts
+WHERE model_run_at > issue_time + INTERVAL '1 day';
+```
+
+The 1-hour / 1-day thresholds are coarse but reliable — the live
+job's `Persistent=true` catch-up could push `model_run_at` an hour
+or two past `issue_time`, but never a full day.
+
+### When *not* to run a hindcast
+
+- Before PR 3 merges. The harness only exists from PR 3 onwards;
+  earlier hindcasts have no driver here.
+- Inside the same hour as a live tick at the same `issue_time`. The
+  uniqueness key collides — ON CONFLICT DO NOTHING preserves the
+  live row, so the hindcast batch records zero `rows_inserted`. To
+  replay a live tick deliberately, bump `model_version` to a
+  `_hindcast_<date>`-suffixed variant (per `docs/phase3-scoping.md`
+  §3.2) before the rerun.
+- Against a window outside the observation history. Persistence /
+  recession both raise `ValueError` per issue-time when the lookback
+  is empty; the harness logs and continues, but a window of
+  pre-2000 issue-times is just noise.
 
 ## Why systemd timer here, APScheduler in nokken-data?
 

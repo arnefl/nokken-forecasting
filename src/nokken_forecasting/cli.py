@@ -1,6 +1,6 @@
 """CLI dispatcher for ``nokken-forecasting``.
 
-Three sub-apps today:
+Four sub-apps today:
 
 * ``inspect``  — read-only tour of the shared Postgres schema
   (Phase 2).
@@ -17,13 +17,21 @@ Three sub-apps today:
     every gauge in ``jobs.forecast_job.FORECAST_GAUGES`` and writes
     one tick's rows in a single connection. Idempotent on the
     writer's deterministic uniqueness key.
+* ``hindcast`` — replay a baseline at historical issue-times so
+  PR 6's comparison report has rows to score against:
 
-All three ride the single pool from
+  * ``hindcast run`` — manual operator path. Builds an issue-time
+    list from ``--start``/``--end``/``--cadence`` and dispatches
+    via :func:`nokken_forecasting.hindcast.run_hindcast`. Every row
+    written by one invocation shares one ``model_run_at`` stamp;
+    rerunning is a no-op on the writer's uniqueness key.
+
+All four ride the single pool from
 ``nokken_forecasting.db.postgres.get_pool``. The pool sets
 ``default_transaction_read_only = on`` at session init so reads are
-defended in depth; the ``forecast`` writers opt into a read-write
-transaction inside ``insert_forecasts`` so writes land while adjacent
-reads on the same connection stay defended.
+defended in depth; the ``forecast`` and ``hindcast`` writers opt into
+a read-write transaction inside ``insert_forecasts`` so writes land
+while adjacent reads on the same connection stay defended.
 """
 
 from __future__ import annotations
@@ -42,9 +50,11 @@ from nokken_forecasting.baselines.persistence import (
     HORIZON_HOURS,
     persistence_forecast,
 )
+from nokken_forecasting.baselines.recession import recession_forecast
 from nokken_forecasting.config import get_settings
 from nokken_forecasting.db import inspect as db_inspect
 from nokken_forecasting.db.postgres import close_pool
+from nokken_forecasting.hindcast import run_hindcast
 from nokken_forecasting.jobs.forecast_job import run_forecast_job
 from nokken_forecasting.logging import configure_logging
 from nokken_forecasting.queries import (
@@ -66,6 +76,33 @@ _LOG = logging.getLogger("nokken_forecasting.cli")
 # least one row inside this window. Keeps the read narrow without
 # risking an "empty series" failure for a recently-published gauge.
 _PERSISTENCE_LOOKBACK_HOURS = 24 * 7
+
+# Look-back window for the hindcast harness. Wider than the live path
+# because the recession baseline needs enough history to identify a
+# >= 24 h monotonic-decay segment, and Faukstad's mixed-cadence series
+# (§1.2 — dominant hourly with occasional 2 h / daily / outage stretches)
+# can leave most of a 30-day window with no usable segment. 90 days is
+# the safe floor; recession's fit through-origin OLS is closed-form so
+# the extra rows have negligible cost. Persistence ignores the bulk of
+# the window — it only seeds from the most-recent row.
+_HINDCAST_LOOKBACK_HOURS = 24 * 90
+
+# Mapping from --cadence flag to a pandas frequency alias. ``W-MON``
+# anchors weekly steps to Mondays so a weekly run starting on a Monday
+# emits issue-times exactly 7 days apart; the unanchored ``W`` would
+# silently shift to Sundays.
+_CADENCE_FREQ: dict[str, str] = {
+    "hourly": "h",
+    "daily": "D",
+    "weekly": "7D",
+}
+
+# Map from --baseline flag to the pure baseline function. Adding a new
+# baseline is one line here plus a choice in ``_build_hindcast_parser``.
+_HINDCAST_BASELINES = {
+    "persistence": persistence_forecast,
+    "recession": recession_forecast,
+}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -114,6 +151,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _build_query_parser(sub)
     _build_forecast_parser(sub)
+    _build_hindcast_parser(sub)
     return parser
 
 
@@ -288,10 +326,80 @@ def _build_forecast_parser(sub: argparse._SubParsersAction) -> None:
     )
 
 
+def _build_hindcast_parser(sub: argparse._SubParsersAction) -> None:
+    hindcast = sub.add_parser(
+        "hindcast",
+        help=(
+            "Replay a baseline at historical issue-times and write rows "
+            "to `forecasts`."
+        ),
+    )
+    hindcast_sub = hindcast.add_subparsers(dest="command", required=True)
+
+    run = hindcast_sub.add_parser(
+        "run",
+        help=(
+            "Build an issue-time list from --start/--end/--cadence and "
+            "dispatch the named baseline through the harness. Every row "
+            "written by one invocation shares one model_run_at stamp."
+        ),
+    )
+    run.add_argument(
+        "--baseline",
+        choices=sorted(_HINDCAST_BASELINES),
+        required=True,
+        help="Which baseline to replay (persistence | recession).",
+    )
+    run.add_argument(
+        "--gauge-id",
+        type=int,
+        required=True,
+        help="Single gauge to hindcast against — multi-gauge is post-Phase-3.",
+    )
+    run.add_argument(
+        "--start",
+        required=True,
+        help=(
+            "ISO-8601 UTC start of the issue-time window (inclusive). "
+            "Naive inputs interpreted as UTC."
+        ),
+    )
+    run.add_argument(
+        "--end",
+        required=True,
+        help=(
+            "ISO-8601 UTC end of the issue-time window (inclusive). "
+            "Naive inputs interpreted as UTC."
+        ),
+    )
+    run.add_argument(
+        "--cadence",
+        choices=sorted(_CADENCE_FREQ),
+        default="weekly",
+        help=(
+            "Spacing between consecutive issue-times (default: weekly). "
+            "Weekly produces ~52 issue-times per year; 'daily' and "
+            "'hourly' are available for tighter windows."
+        ),
+    )
+    run.add_argument(
+        "--value-type",
+        choices=["flow", "level"],
+        default="flow",
+        help="Observation column the baseline projects (default: flow).",
+    )
+    run.add_argument(
+        "--horizon-hours",
+        type=int,
+        default=HORIZON_HOURS,
+        help=f"Forecast horizon in hours (default: {HORIZON_HOURS} = 7 days).",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if args.group not in {"inspect", "query", "forecast"}:
+    if args.group not in {"inspect", "query", "forecast", "hindcast"}:
         parser.error(f"unknown group: {args.group}")
     configure_logging(get_settings().log_level)
     return asyncio.run(_run(args))
@@ -305,7 +413,9 @@ async def _run(args: argparse.Namespace) -> int:
             return await _dispatch_inspect(args)
         if args.group == "query":
             return await _dispatch_query(args)
-        return await _dispatch_forecast(args)
+        if args.group == "forecast":
+            return await _dispatch_forecast(args)
+        return await _dispatch_hindcast(args)
     finally:
         await close_pool()
 
@@ -429,6 +539,120 @@ async def _dispatch_forecast_run(args: argparse.Namespace) -> int:
         horizon_hours=args.horizon_hours,
     )
     return summary.exit_code
+
+
+async def _dispatch_hindcast(args: argparse.Namespace) -> int:
+    if args.command == "run":
+        return await _dispatch_hindcast_run(args)
+    print(f"unknown command: {args.command}", file=sys.stderr)
+    return 2
+
+
+def _build_issue_times(
+    *, start: pd.Timestamp, end: pd.Timestamp, cadence: str
+) -> list[pd.Timestamp]:
+    """Inclusive [start, end] range stepped by ``cadence``.
+
+    ``pd.date_range`` with a frequency alias gives us a deterministic
+    list per (start, end, cadence) tuple — same input, same output, no
+    drift across reruns. Both bounds are honoured: ``end`` lands in
+    the list when it sits exactly on a step.
+    """
+    if end < start:
+        raise ValueError(f"--end {end.isoformat()} is before --start {start.isoformat()}")
+    freq = _CADENCE_FREQ[cadence]
+    issue_times = pd.date_range(start=start, end=end, freq=freq, tz="UTC")
+    return list(issue_times)
+
+
+async def _dispatch_hindcast_run(args: argparse.Namespace) -> int:
+    try:
+        start = _parse_ts(args.start)
+        end = _parse_ts(args.end)
+    except ValueError as exc:
+        print(f"error: invalid --start/--end: {exc}", file=sys.stderr)
+        return 2
+    try:
+        issue_times = _build_issue_times(start=start, end=end, cadence=args.cadence)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if not issue_times:
+        print(
+            "error: --start/--end/--cadence produced an empty issue-time list",
+            file=sys.stderr,
+        )
+        return 2
+
+    baseline_fn = _HINDCAST_BASELINES[args.baseline]
+    model_run_at = datetime.now(UTC)
+
+    _LOG.info(
+        "hindcast.start",
+        extra={
+            "event": "hindcast.start",
+            "baseline": args.baseline,
+            "gauge_id": args.gauge_id,
+            "value_type": args.value_type,
+            "horizon_hours": args.horizon_hours,
+            "cadence": args.cadence,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "issue_times": len(issue_times),
+            "model_run_at": model_run_at.isoformat(),
+        },
+    )
+
+    try:
+        async with connect() as conn:
+            async def _read(it: pd.Timestamp) -> pd.DataFrame:
+                lookback_start = it - pd.Timedelta(hours=_HINDCAST_LOOKBACK_HOURS)
+                # Half-open [start, end) — push past `it` by one second
+                # so an observation stamped exactly at the issue-time
+                # falls inside the read window. Mirrors the live path.
+                lookback_end = it + pd.Timedelta(seconds=1)
+                return await get_observations(
+                    conn,
+                    gauge_id=args.gauge_id,
+                    start=lookback_start,
+                    end=lookback_end,
+                    value_type=args.value_type,
+                )
+
+            async def _write(rows: Any, run_at: datetime) -> int:
+                return await insert_forecasts(conn, rows, model_run_at=run_at)
+
+            summary = await run_hindcast(
+                baseline_fn,
+                gauge_id=args.gauge_id,
+                issue_times=issue_times,
+                observations_reader=_read,
+                writer=_write,
+                model_run_at=model_run_at,
+                horizon_hours=args.horizon_hours,
+                value_type=args.value_type,
+            )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    _LOG.info(
+        "hindcast.done",
+        extra={
+            "event": "hindcast.done",
+            "baseline": args.baseline,
+            "gauge_id": args.gauge_id,
+            "model_run_at": model_run_at.isoformat(),
+            "issue_times": len(issue_times),
+            "succeeded": summary.succeeded,
+            "failed": summary.failed,
+            "rows_attempted": summary.rows_attempted,
+            "rows_inserted": summary.rows_inserted,
+        },
+    )
+    # Exit 0 unless every issue-time errored — single-bad-issue-time
+    # in a long backfill should not fail the whole invocation.
+    return 1 if summary.outcomes and summary.failed == len(summary.outcomes) else 0
 
 
 async def _run_query_command(
