@@ -205,11 +205,20 @@ above), so writes are blocked twice over; that is deliberate and
 must not be softened.
 
 The DSN in `.env` may, in principle, be write-capable (e.g., if a
-Phase 6 deploy reuses the same file). This repo is consumer-side
-only through Phase 5 — do not invent a write path on top of
-`get_pool()`. When the forecast-sink write path lands in Phase 6,
-it gets its own pool without the read-only init and with a role
-scoped to the sink tables; the read-only pool here stays as-is.
+Phase 6 deploy reuses the same file). Do not invent a write path on
+top of `get_pool()`.
+
+The forecast-sink write path lands in Phase 3 PR 1 as a **second
+pool** in `db/postgres.py` — `get_write_pool()` / `close_write_pool()`
+— sourced from `POSTGRES_WRITE_DSN` (separate from `POSTGRES_DSN`).
+This pool has no read-only init, expects the
+`nokken_forecast_writer` role on production deploy units, and is
+used only by the writer surface in `src/nokken_forecasting/writers/`
+and the `forecast` CLI subcommand. The `inspect` and `query`
+subcommands continue to ride only the read-only pool, and that
+invariant must not be softened. Local dev / unit tests leave
+`POSTGRES_WRITE_DSN` unset; the write pool then refuses to open and
+the `forecast` CLI fails fast.
 
 Subcommands — run any of them with `--json` to emit machine-readable
 output instead of the default aligned text:
@@ -227,6 +236,15 @@ output instead of the default aligned text:
 - `nokken-forecasting inspect query "<SELECT …>"`
   — arbitrary read-only query; the dispatcher rejects anything
   whose first non-comment token is not `SELECT` (case-insensitive).
+
+The `forecast` group runs a baseline and writes its rows into
+`forecasts` via the write-capable pool described above:
+
+- `nokken-forecasting forecast persistence --gauge-id <id>
+  --issue-time <iso> [--value-type flow|level] [--horizon-hours N]`
+  — last observation held flat for `--horizon-hours` (default 168 =
+  7 days), `model_version = 'persistence_v1'`, `model_run_at`
+  stamped at write time. Requires `POSTGRES_WRITE_DSN` to be set.
 
 Examples:
 

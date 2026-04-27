@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     # caller that tries to open a connection will fail fast.
     postgres_dsn: str = Field(default="postgresql://nokken:@localhost:5432/nessie")
 
+    # Write-capable DSN for the forecast-sink path (Phase 3 PR 1+).
+    # Carries the `nokken_forecast_writer` role on production deploy
+    # units; unset locally and in unit tests, in which case opening
+    # the write pool fails fast. Never reuse `postgres_dsn` for writes
+    # — that pool sets `default_transaction_read_only = on`.
+    postgres_write_dsn: str | None = Field(default=None)
+
     log_level: str = Field(default="INFO")
 
 

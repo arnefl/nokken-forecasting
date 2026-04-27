@@ -1,20 +1,21 @@
 """CLI dispatcher for ``nokken-forecasting``.
 
-Two sub-apps today:
+Three sub-apps today:
 
-* ``inspect`` — read-only tour of the shared Postgres schema
+* ``inspect``  — read-only tour of the shared Postgres schema
   (Phase 2).
-* ``query``   — typed-DataFrame readers backing the Phase 3 baselines
-  exposed for ad-hoc operator spot-checks (Phase 3b). Output mirrors
-  ``inspect``'s aligned-text / ``--json`` shape.
+* ``query``    — typed-DataFrame readers backing the Phase 3
+  baselines exposed for ad-hoc operator spot-checks (Phase 3b).
+  Output mirrors ``inspect``'s aligned-text / ``--json`` shape.
+* ``forecast`` — run a baseline for a given gauge + issue time and
+  write the rows into ``forecasts`` (Phase 3 PR 1+). The scheduled
+  job that wraps this on a timer lands in PR 2.
 
-Phase 6 will add ``run`` for the scheduled forecast job; the
-top-level dispatcher is kept argparse-simple so adding that doesn't
-need a dependency change.
-
-Every query issued through these subcommands rides the pool from
+``inspect`` and ``query`` ride the read-only pool from
 ``nokken_forecasting.db.postgres.get_pool``, which enforces
 ``default_transaction_read_only = on`` at the session level.
+``forecast`` reads from the same pool but writes through the
+write-capable pool ``get_write_pool`` against ``POSTGRES_WRITE_DSN``.
 """
 
 from __future__ import annotations
@@ -22,14 +23,20 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
 
+from nokken_forecasting.baselines.persistence import (
+    HORIZON_HOURS,
+    persistence_forecast,
+)
+from nokken_forecasting.config import get_settings
 from nokken_forecasting.db import inspect as db_inspect
-from nokken_forecasting.db.postgres import close_pool
+from nokken_forecasting.db.postgres import close_pool, close_write_pool
 from nokken_forecasting.queries import (
     connect,
     get_gauges,
@@ -39,6 +46,16 @@ from nokken_forecasting.queries import (
     get_weather_forecast_latest_as_of,
     get_weather_observations,
 )
+from nokken_forecasting.writers import connect_write, insert_forecasts
+
+_LOG = logging.getLogger("nokken_forecasting.cli")
+
+# Look-back window over which we fetch observations to seed the
+# persistence baseline. 7 days is generous: any cadence covered by
+# §1.2 of the scoping doc (hourly / daily / two-hourly) yields at
+# least one row inside this window. Keeps the read narrow without
+# risking an "empty series" failure for a recently-published gauge.
+_PERSISTENCE_LOOKBACK_HOURS = 24 * 7
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -86,6 +103,7 @@ def _build_parser() -> argparse.ArgumentParser:
     query.add_argument("sql", help="SQL statement; must begin with SELECT.")
 
     _build_query_parser(sub)
+    _build_forecast_parser(sub)
     return parser
 
 
@@ -188,23 +206,64 @@ def _build_query_parser(sub: argparse._SubParsersAction) -> None:
     wal.add_argument("--source", default=None)
 
 
+def _build_forecast_parser(sub: argparse._SubParsersAction) -> None:
+    forecast = sub.add_parser(
+        "forecast",
+        help="Run a baseline and write the rows into `forecasts`.",
+    )
+    forecast_sub = forecast.add_subparsers(dest="command", required=True)
+
+    persistence = forecast_sub.add_parser(
+        "persistence",
+        help="Persistence baseline (`persistence_v1`): last obs held flat.",
+    )
+    persistence.add_argument("--gauge-id", type=int, required=True)
+    persistence.add_argument(
+        "--issue-time",
+        required=True,
+        help=(
+            "ISO-8601 UTC issue time, e.g. 2026-04-27T12:00:00Z. "
+            "Naive inputs are interpreted as UTC."
+        ),
+    )
+    persistence.add_argument(
+        "--value-type",
+        choices=["flow", "level"],
+        default="flow",
+        help="Observation column to persist (default: flow).",
+    )
+    persistence.add_argument(
+        "--horizon-hours",
+        type=int,
+        default=HORIZON_HOURS,
+        help=f"Forecast horizon in hours (default: {HORIZON_HOURS} = 7 days).",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if args.group not in {"inspect", "query"}:
+    if args.group not in {"inspect", "query", "forecast"}:
         parser.error(f"unknown group: {args.group}")
+    logging.basicConfig(
+        level=get_settings().log_level.upper(),
+        format='{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}',
+    )
     return asyncio.run(_run(args))
 
 
 async def _run(args: argparse.Namespace) -> int:
-    # The pool is bound to the active event loop, so opening and
+    # The pools are bound to the active event loop, so opening and
     # closing must happen inside the same asyncio.run() invocation.
     try:
         if args.group == "inspect":
             return await _dispatch_inspect(args)
-        return await _dispatch_query(args)
+        if args.group == "query":
+            return await _dispatch_query(args)
+        return await _dispatch_forecast(args)
     finally:
         await close_pool()
+        await close_write_pool()
 
 
 async def _dispatch_inspect(args: argparse.Namespace) -> int:
@@ -245,6 +304,60 @@ async def _dispatch_query(args: argparse.Namespace) -> int:
     if args.limit is not None and args.limit >= 0:
         df = df.head(args.limit)
     _emit_dataframe(df, as_json=args.json)
+    return 0
+
+
+async def _dispatch_forecast(args: argparse.Namespace) -> int:
+    if args.command != "persistence":
+        print(f"unknown command: {args.command}", file=sys.stderr)
+        return 2
+    try:
+        issue_time = _parse_ts(args.issue_time)
+    except ValueError as exc:
+        print(f"error: invalid --issue-time: {exc}", file=sys.stderr)
+        return 2
+    lookback_start = issue_time - pd.Timedelta(hours=_PERSISTENCE_LOOKBACK_HOURS)
+    # Half-open window upper bound is exclusive — push past `issue_time`
+    # by one second to keep an observation stamped exactly at
+    # `issue_time` inside the read window.
+    lookback_end = issue_time + pd.Timedelta(seconds=1)
+
+    try:
+        async with connect() as conn:
+            obs = await get_observations(
+                conn,
+                gauge_id=args.gauge_id,
+                start=lookback_start,
+                end=lookback_end,
+                value_type=args.value_type,
+            )
+        rows = persistence_forecast(
+            obs,
+            gauge_id=args.gauge_id,
+            issue_time=issue_time,
+            value_type=args.value_type,
+            horizon_hours=args.horizon_hours,
+        )
+        model_run_at = datetime.now(UTC)
+        async with connect_write() as conn:
+            inserted = await insert_forecasts(
+                conn, rows, model_run_at=model_run_at
+            )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    _LOG.info(
+        "persistence forecast written: gauge_id=%s issue_time=%s "
+        "value_type=%s horizon_hours=%s rows=%s inserted=%s "
+        "model_run_at=%s",
+        args.gauge_id,
+        issue_time.isoformat(),
+        args.value_type,
+        args.horizon_hours,
+        len(rows),
+        inserted,
+        model_run_at.isoformat(),
+    )
     return 0
 
 
