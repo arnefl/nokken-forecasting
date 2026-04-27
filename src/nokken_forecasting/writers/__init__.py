@@ -1,25 +1,20 @@
 """Write paths into nokken-web's Postgres schema.
 
-Phase 3 PR 1 introduces the **forecast-sink** writer. Mirrors the
-``queries`` package's shape: connection-agnostic functions and a
-``connect_write`` helper for callers (CLI, scheduled job, hindcast
-harness) that want a one-shot ``async with`` over the write-capable
-pool.
+Phase 3 PR 1 introduces the **forecast-sink** writer
+(``insert_forecasts``). The writer is connection-agnostic and runs on
+the single pool from ``nokken_forecasting.db.postgres``; callers
+acquire a connection through the existing ``queries.connect`` helper.
 
-The write-capable pool lives in ``nokken_forecasting.db.postgres``
-under ``get_write_pool`` / ``close_write_pool``; it does **not** set
-``default_transaction_read_only = on`` and is sourced from a separate
-DSN (``POSTGRES_WRITE_DSN``) carrying the writer-scoped role on
-production deploy units. The read-only pool used by the inspect CLI
-and the query-layer readers stays untouched.
+Defense in depth: the pool sets
+``default_transaction_read_only = on`` at session init, so query-side
+callers can't accidentally write. The writer opts out per transaction
+by opening ``conn.transaction(readonly=False)`` — the session default
+snaps back on the next transaction. Production write privileges are
+granted through the role on ``POSTGRES_DSN`` (one role per repo).
 """
 
 from __future__ import annotations
 
-from nokken_forecasting.writers._connection import connect_write
 from nokken_forecasting.writers.forecasts import insert_forecasts
 
-__all__ = [
-    "connect_write",
-    "insert_forecasts",
-]
+__all__ = ["insert_forecasts"]

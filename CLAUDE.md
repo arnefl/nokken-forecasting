@@ -204,21 +204,21 @@ role's table privileges. The local-dev DSN copied from
 above), so writes are blocked twice over; that is deliberate and
 must not be softened.
 
-The DSN in `.env` may, in principle, be write-capable (e.g., if a
-Phase 6 deploy reuses the same file). Do not invent a write path on
-top of `get_pool()`.
+One pool, one DSN. The forecast-sink write path lands in Phase 3
+PR 1 on the **same pool** the readers use; the writer
+(`src/nokken_forecasting/writers/forecasts.py`) opts into a
+read-write transaction via `conn.transaction(readonly=False)`
+(`BEGIN READ WRITE`), which overrides the session-level read-only
+default for that transaction only. Adjacent reads on the same
+connection stay defended.
 
-The forecast-sink write path lands in Phase 3 PR 1 as a **second
-pool** in `db/postgres.py` — `get_write_pool()` / `close_write_pool()`
-— sourced from `POSTGRES_WRITE_DSN` (separate from `POSTGRES_DSN`).
-This pool has no read-only init, expects the
-`nokken_forecast_writer` role on production deploy units, and is
-used only by the writer surface in `src/nokken_forecasting/writers/`
-and the `forecast` CLI subcommand. The `inspect` and `query`
-subcommands continue to ride only the read-only pool, and that
-invariant must not be softened. Local dev / unit tests leave
-`POSTGRES_WRITE_DSN` unset; the write pool then refuses to open and
-the `forecast` CLI fails fast.
+The operator's standing policy is one Postgres role per repo: this
+repo's `POSTGRES_DSN` role is `nokken_ro` locally and a single
+production role with `INSERT` on `forecasts` granted on prod. There
+is no separate writer DSN and no separate writer role. The
+`inspect` and `query` subcommands inherit the session-level
+read-only invariant unchanged; only the `forecast` group's writer
+opens a read-write transaction.
 
 Subcommands — run any of them with `--json` to emit machine-readable
 output instead of the default aligned text:

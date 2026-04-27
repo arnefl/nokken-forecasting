@@ -15,7 +15,7 @@ from nokken_forecasting import cli
 
 
 class TestParser:
-    def test_forecast_persistence_required_args(self) -> None:
+    def test_forecast_persistence_with_explicit_issue_time(self) -> None:
         parser = cli._build_parser()
         args = parser.parse_args(
             [
@@ -34,6 +34,18 @@ class TestParser:
         # Defaults match the scoping doc's spec.
         assert args.value_type == "flow"
         assert args.horizon_hours == 168
+
+    def test_forecast_persistence_issue_time_defaults_to_now(self) -> None:
+        # `--issue-time` is optional for manual operator runs;
+        # `_dispatch_forecast` substitutes `pd.Timestamp.now(tz='UTC')`
+        # when the parsed value is None. PR 2's scheduled job will
+        # always pass `--issue-time` explicitly.
+        parser = cli._build_parser()
+        args = parser.parse_args(
+            ["forecast", "persistence", "--gauge-id", "12"]
+        )
+        assert args.gauge_id == 12
+        assert args.issue_time is None
 
     def test_forecast_persistence_overrides(self) -> None:
         parser = cli._build_parser()

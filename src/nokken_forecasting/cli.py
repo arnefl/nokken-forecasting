@@ -11,11 +11,12 @@ Three sub-apps today:
   write the rows into ``forecasts`` (Phase 3 PR 1+). The scheduled
   job that wraps this on a timer lands in PR 2.
 
-``inspect`` and ``query`` ride the read-only pool from
-``nokken_forecasting.db.postgres.get_pool``, which enforces
-``default_transaction_read_only = on`` at the session level.
-``forecast`` reads from the same pool but writes through the
-write-capable pool ``get_write_pool`` against ``POSTGRES_WRITE_DSN``.
+All three ride the single pool from
+``nokken_forecasting.db.postgres.get_pool``. The pool sets
+``default_transaction_read_only = on`` at session init so reads are
+defended in depth; ``forecast`` opts into a read-write transaction
+inside ``insert_forecasts`` (``BEGIN READ WRITE``) so its writes
+land while adjacent reads on the same connection stay defended.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ from nokken_forecasting.baselines.persistence import (
 )
 from nokken_forecasting.config import get_settings
 from nokken_forecasting.db import inspect as db_inspect
-from nokken_forecasting.db.postgres import close_pool, close_write_pool
+from nokken_forecasting.db.postgres import close_pool
 from nokken_forecasting.queries import (
     connect,
     get_gauges,
@@ -46,7 +47,7 @@ from nokken_forecasting.queries import (
     get_weather_forecast_latest_as_of,
     get_weather_observations,
 )
-from nokken_forecasting.writers import connect_write, insert_forecasts
+from nokken_forecasting.writers import insert_forecasts
 
 _LOG = logging.getLogger("nokken_forecasting.cli")
 
@@ -218,12 +219,17 @@ def _build_forecast_parser(sub: argparse._SubParsersAction) -> None:
         help="Persistence baseline (`persistence_v1`): last obs held flat.",
     )
     persistence.add_argument("--gauge-id", type=int, required=True)
+    # Default to wall-clock now() so manual operator runs don't need
+    # to compute the timestamp; the scheduled job (PR 2) will pass
+    # `--issue-time` explicitly aligned to its cron cadence (§4.1
+    # leaves cadence open beyond "daily" for PR 2's systemd timer).
     persistence.add_argument(
         "--issue-time",
-        required=True,
+        default=None,
         help=(
             "ISO-8601 UTC issue time, e.g. 2026-04-27T12:00:00Z. "
-            "Naive inputs are interpreted as UTC."
+            "Naive inputs are interpreted as UTC. "
+            "Default: current wall-clock UTC."
         ),
     )
     persistence.add_argument(
@@ -253,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 async def _run(args: argparse.Namespace) -> int:
-    # The pools are bound to the active event loop, so opening and
+    # The pool is bound to the active event loop, so opening and
     # closing must happen inside the same asyncio.run() invocation.
     try:
         if args.group == "inspect":
@@ -263,7 +269,6 @@ async def _run(args: argparse.Namespace) -> int:
         return await _dispatch_forecast(args)
     finally:
         await close_pool()
-        await close_write_pool()
 
 
 async def _dispatch_inspect(args: argparse.Namespace) -> int:
@@ -312,7 +317,11 @@ async def _dispatch_forecast(args: argparse.Namespace) -> int:
         print(f"unknown command: {args.command}", file=sys.stderr)
         return 2
     try:
-        issue_time = _parse_ts(args.issue_time)
+        issue_time = (
+            pd.Timestamp.now(tz="UTC")
+            if args.issue_time is None
+            else _parse_ts(args.issue_time)
+        )
     except ValueError as exc:
         print(f"error: invalid --issue-time: {exc}", file=sys.stderr)
         return 2
@@ -331,15 +340,14 @@ async def _dispatch_forecast(args: argparse.Namespace) -> int:
                 end=lookback_end,
                 value_type=args.value_type,
             )
-        rows = persistence_forecast(
-            obs,
-            gauge_id=args.gauge_id,
-            issue_time=issue_time,
-            value_type=args.value_type,
-            horizon_hours=args.horizon_hours,
-        )
-        model_run_at = datetime.now(UTC)
-        async with connect_write() as conn:
+            rows = persistence_forecast(
+                obs,
+                gauge_id=args.gauge_id,
+                issue_time=issue_time,
+                value_type=args.value_type,
+                horizon_hours=args.horizon_hours,
+            )
+            model_run_at = datetime.now(UTC)
             inserted = await insert_forecasts(
                 conn, rows, model_run_at=model_run_at
             )

@@ -7,11 +7,11 @@ asyncpg connection with the synthetic Faukstad gauge in place but
 the ``forecasts`` table empty.
 
 The writer is connection-agnostic, so injecting ``seeded_conn``
-directly bypasses the pool layer here. The pool wiring
-(``connect_write`` against ``POSTGRES_WRITE_DSN``) is exercised by
-the integration runtime when the operator points the env var at
-`nessie` post-deploy; the pool itself has no logic worth a
-dedicated unit test beyond the fail-fast on a missing DSN.
+directly is enough for round-trip coverage. The single pool from
+``db.postgres.get_pool`` is exercised at runtime by the ``forecast``
+CLI subcommand and (PR 2) the scheduled job; its
+``default_transaction_read_only`` invariant is already covered by
+``tests/integration/test_inspect.py``.
 """
 
 from __future__ import annotations
@@ -121,25 +121,28 @@ class TestInsertForecasts:
         assert len(distinct_run_at) == 1
         assert distinct_run_at[0]["model_run_at"] == run_at
 
-    async def test_idempotent_rerun_skips_conflicts(
+    async def test_rerun_is_no_op_and_preserves_original_model_run_at(
         self, seeded_conn: asyncpg.Connection
     ) -> None:
+        # Contract guard: ON CONFLICT DO NOTHING means a rerun of the
+        # same (issue, valid, gauge, value_type, model_version) tuple
+        # is a no-op AND the original `model_run_at` survives. Any
+        # future change to DO UPDATE SET model_run_at = NOW() will
+        # break this test deliberately, forcing a contract review.
         issue = pd.Timestamp("2026-04-27T12:00:00", tz="UTC")
         valid = issue + pd.Timedelta(hours=1)
         run_at = datetime(2026, 4, 27, 12, 0, 30, tzinfo=UTC)
         batch = [_row(issue_time=issue, valid_time=valid, value=42.5)]
 
         first = await insert_forecasts(seeded_conn, batch, model_run_at=run_at)
-        # Second invocation — same (issue, valid, gauge, value_type,
-        # model_version) tuple — should ON CONFLICT DO NOTHING. We
-        # bump model_run_at to confirm the original row is preserved.
+        # Bump model_run_at on the rerun: if DO NOTHING ever flipped to
+        # DO UPDATE, the stored value would shift to run_at + 1h.
         second = await insert_forecasts(
             seeded_conn, batch, model_run_at=run_at + timedelta(hours=1)
         )
         assert first == 1
         assert second == 0
 
-        # Original row still carries the original model_run_at.
         stored_run_at = await seeded_conn.fetchval(
             "SELECT model_run_at FROM forecasts WHERE gauge_id = $1",
             FIXTURE_GAUGE_ID,
@@ -159,6 +162,10 @@ class TestInsertForecasts:
     async def test_naive_model_run_at_rejected(
         self, seeded_conn: asyncpg.Connection
     ) -> None:
+        # Tz contract (see writer module docstring): naive datetime
+        # inputs raise so a silent off-by-one tz mismatch can't creep
+        # in. Symmetric with `to_db_timestamp`'s naive-rejection on
+        # the TIMESTAMP-WITHOUT-TZ columns.
         issue = pd.Timestamp("2026-04-27T12:00:00", tz="UTC")
         rows = [_row(issue_time=issue, valid_time=issue + pd.Timedelta(hours=1), value=1.0)]
         with pytest.raises(ValueError, match="tz-aware"):
@@ -183,11 +190,12 @@ class TestInsertForecasts:
                 seeded_conn, rows, model_run_at=datetime(2026, 4, 27, 12, tzinfo=UTC)
             )
 
-    async def test_non_utc_timezone_normalised(
+    async def test_non_utc_aware_model_run_at_converted_to_utc(
         self, seeded_conn: asyncpg.Connection
     ) -> None:
-        # model_run_at can come in tz-aware non-UTC; it should be
-        # converted to UTC before binding so the stored value matches.
+        # Tz contract (see writer module docstring): tz-aware non-UTC
+        # inputs are accepted and converted to UTC at the wire
+        # boundary. 14:00:30+02:00 should land as 12:00:30Z.
         plus_two = timezone(timedelta(hours=2))
         run_at_local = datetime(2026, 4, 27, 14, 0, 30, tzinfo=plus_two)
         run_at_utc = run_at_local.astimezone(UTC)

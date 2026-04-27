@@ -8,21 +8,32 @@ the wall-clock execution stamp distinguishing live forecasts
 (``≈ issue_time``) from hindcasts (``≫ issue_time``); it is audit-only
 and not part of any unique index.
 
-Time-column wire shape: ``issue_time`` and ``valid_time`` are
-``TIMESTAMP WITHOUT TIME ZONE`` (interpreted as naive UTC across the
-three sibling repos), so tz-aware UTC inputs are converted to naive
-UTC before binding. ``model_run_at`` is ``TIMESTAMPTZ`` and is bound
-tz-aware.
+Time-column wire shapes:
 
-Idempotency mirrors the deterministic-row writer in
-``nokken-data``'s weather-forecast pipelines: ``ON CONFLICT
-(issue_time, valid_time, gauge_id, value_type, model_version) WHERE
-quantile IS NULL DO NOTHING`` against the partial-unique index from
-migration 003. Re-running the same model run is therefore a no-op.
-The probabilistic-row idempotency lane (separate partial-unique
-index on the same columns plus ``quantile``) is unused by the
-persistence baseline (which is deterministic) and lands when a
-quantile-emitting baseline does (PR 5, GBT).
+* ``issue_time`` and ``valid_time`` are ``TIMESTAMP WITHOUT TIME ZONE``
+  (interpreted as naive UTC across the three sibling repos).
+* ``model_run_at`` is ``TIMESTAMPTZ``.
+
+Timezone contract — applies to all three columns and to every public
+input on this writer (``model_run_at`` here, ``issue_time`` /
+``valid_time`` on each ``ForecastRow``): **lenient on tz-aware,
+strict on naive.** Any tz-aware input is converted to UTC at the wire
+boundary; naive inputs are rejected with ``ValueError`` so a silent
+off-by-one tz mismatch cannot creep in. ``to_db_timestamp`` (shared
+with the readers) enforces the contract for the TIMESTAMP-WITHOUT-TZ
+columns; ``model_run_at`` is checked inline below.
+
+Idempotency: ``ON CONFLICT … DO NOTHING`` against the deterministic
+partial-unique index from migration 003. Rerunning the same
+(issue_time, valid_time, gauge_id, value_type, model_version) tuple
+is a no-op by design — the original ``model_run_at`` is preserved so
+the audit trail reflects when each row was *first* written, not when
+it was most recently re-attempted. Any future change to ``DO UPDATE
+SET model_run_at = NOW()`` would deliberately fail the rerun-no-op
+integration test and force a contract review. The probabilistic
+idempotency lane (separate partial-unique index keyed on the same
+columns plus ``quantile``) is unused by the persistence baseline and
+lands when a quantile-emitting baseline does (PR 5, GBT).
 """
 
 from __future__ import annotations
@@ -44,6 +55,9 @@ _DETERMINISTIC_INSERT_SQL = (
     "(issue_time, valid_time, gauge_id, value_type, quantile, value, "
     "model_version, model_run_at) "
     "VALUES ($1, $2, $3, $4, NULL, $5, $6, $7) "
+    # DO NOTHING (not DO UPDATE): rerun is a no-op by design so the
+    # audit trail's `model_run_at` reflects when each row was first
+    # written. See the module docstring's "Idempotency" paragraph.
     "ON CONFLICT (issue_time, valid_time, gauge_id, value_type, model_version) "
     "WHERE quantile IS NULL DO NOTHING"
 )
@@ -62,19 +76,18 @@ async def insert_forecasts(
     ``datetime.now(UTC)``; PR 3's hindcast harness will pass the
     wall-clock time of the harness invocation, distinguishing the
     rows from live forecasts even though their ``issue_time`` is
-    historical. ``model_run_at`` must be tz-aware UTC.
+    historical. ``model_run_at`` must be tz-aware (any UTC offset is
+    accepted and converted to UTC); naive datetimes raise.
 
-    The whole batch lands inside a single transaction so a partial
-    insert is impossible. Conflicting rows (same model_version at the
-    same (issue, valid, gauge, value_type)) are skipped via
-    ``ON CONFLICT DO NOTHING``; this matters for idempotent re-runs
-    of a scheduled cycle and for the hindcast harness when re-issuing
-    a window.
+    The whole batch lands inside a single read-write transaction
+    (``conn.transaction(readonly=False)`` overrides the session-level
+    ``default_transaction_read_only = on`` default for this transaction
+    only — adjacent reads on the same connection stay defended).
+    Conflicting rows (same model_version at the same (issue, valid,
+    gauge, value_type)) are skipped via ``ON CONFLICT DO NOTHING``.
 
     All rows must carry ``quantile=None`` — this writer covers the
-    deterministic lane only. Probabilistic rows land via a separate
-    code path (introduced when PR 5's GBT baseline ships native
-    quantiles).
+    deterministic lane only.
     """
     if not rows:
         return 0
@@ -84,7 +97,7 @@ async def insert_forecasts(
         )
     model_run_at_utc = model_run_at.astimezone(UTC)
     inserted = 0
-    async with conn.transaction():
+    async with conn.transaction(readonly=False):
         for row in rows:
             if row.quantile is not None:
                 raise ValueError(
