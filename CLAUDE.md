@@ -204,12 +204,21 @@ role's table privileges. The local-dev DSN copied from
 above), so writes are blocked twice over; that is deliberate and
 must not be softened.
 
-The DSN in `.env` may, in principle, be write-capable (e.g., if a
-Phase 6 deploy reuses the same file). This repo is consumer-side
-only through Phase 5 — do not invent a write path on top of
-`get_pool()`. When the forecast-sink write path lands in Phase 6,
-it gets its own pool without the read-only init and with a role
-scoped to the sink tables; the read-only pool here stays as-is.
+One pool, one DSN. The forecast-sink write path lands in Phase 3
+PR 1 on the **same pool** the readers use; the writer
+(`src/nokken_forecasting/writers/forecasts.py`) opts into a
+read-write transaction via `conn.transaction(readonly=False)`
+(`BEGIN READ WRITE`), which overrides the session-level read-only
+default for that transaction only. Adjacent reads on the same
+connection stay defended.
+
+The operator's standing policy is one Postgres role per repo: this
+repo's `POSTGRES_DSN` role is `nokken_ro` locally and a single
+production role with `INSERT` on `forecasts` granted on prod. There
+is no separate writer DSN and no separate writer role. The
+`inspect` and `query` subcommands inherit the session-level
+read-only invariant unchanged; only the `forecast` group's writer
+opens a read-write transaction.
 
 Subcommands — run any of them with `--json` to emit machine-readable
 output instead of the default aligned text:
@@ -227,6 +236,15 @@ output instead of the default aligned text:
 - `nokken-forecasting inspect query "<SELECT …>"`
   — arbitrary read-only query; the dispatcher rejects anything
   whose first non-comment token is not `SELECT` (case-insensitive).
+
+The `forecast` group runs a baseline and writes its rows into
+`forecasts` via the write-capable pool described above:
+
+- `nokken-forecasting forecast persistence --gauge-id <id>
+  --issue-time <iso> [--value-type flow|level] [--horizon-hours N]`
+  — last observation held flat for `--horizon-hours` (default 168 =
+  7 days), `model_version = 'persistence_v1'`, `model_run_at`
+  stamped at write time. Requires `POSTGRES_WRITE_DSN` to be set.
 
 Examples:
 

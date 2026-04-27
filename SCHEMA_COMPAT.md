@@ -11,30 +11,34 @@ rationale; the same pattern is in use in
 ## Pinned nokken-web commit
 
 ```
-sha    = 4a886011d4087e0c3588f5a4db57cd7bfa2d64de
-pinned = 2026-04-24
+sha    = bc82a5250d7b650b4d44d2828422652e9511fbe7
+pinned = 2026-04-27
 ```
 
 This is the merge commit of
-[nokken-web PR #111](https://github.com/arnefl/nokken-web/pull/111)
-— "schema: weather tables re-keyed to gauge (008)" — which re-keys
-`weather_observations` and `weather_forecasts` from `section_id`
-to `gauge_id` and adds a nullable `basin_version INTEGER` audit
-column on both tables. Phase 3b's query layer reads gauge-keyed
-weather rows directly; `section_id → gauge_id` resolution moves to
-read time via a join through `sections`, and `basin_version`
-carries forward the catchment polygon version each row was
-aggregated under.
+[nokken-web PR #132](https://github.com/arnefl/nokken-web/pull/132)
+— "phase 3 PR 0: add model_run_at audit column to forecasts" — which
+adds a nullable `model_run_at TIMESTAMPTZ` audit column to
+`forecasts` (migration 011). The pin advances so the Phase 3 PR 1
+forecast-sink writer in this repo can populate that column on every
+row, distinguishing live forecasts (`model_run_at ≈ issue_time`)
+from hindcasts (`model_run_at ≫ issue_time`).
 
-The prior pin (`e9f1cf8…`, PR #107, migration 007) introduced the
-`basins` table and `basins_current` view — still in effect, and the
-`basin_version` column added by 008 references that versioning
-scheme. The pin before that (`c18e41a…`, PR #98) introduced the
-three hypertables this repo reads from or (in Phase 6) writes to,
-and remains in effect:
+The prior pin (`4a88601…`, PR #111, migration 008) re-keyed
+`weather_observations` and `weather_forecasts` from `section_id` to
+`gauge_id` and added a nullable `basin_version INTEGER` audit column
+on both tables — still in effect, and Phase 3b's query layer here
+reads against that gauge-keyed shape. The pin before that
+(`e9f1cf8…`, PR #107, migration 007) introduced the `basins` table
+and `basins_current` view — still in effect, and the `basin_version`
+column added by 008 references that versioning scheme. The pin
+before that (`c18e41a…`, PR #98) introduced the three hypertables
+this repo reads from or writes to, and remains in effect:
 
-- `forecasts` — flow / level forecast outputs owned here; multi-lead,
-  multi-quantile, multi-model-version.
+- `forecasts` — flow / level forecast outputs written here from
+  Phase 3 PR 1 onwards; multi-lead, multi-quantile,
+  multi-model-version, with the migration-011 `model_run_at`
+  audit column populated on every write.
 - `weather_observations` — hourly basin-mean historical forcing
   written by nokken-data; read here as training / hindcast input.
   Re-keyed to `gauge_id` by 008.
